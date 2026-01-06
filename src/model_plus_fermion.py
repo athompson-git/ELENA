@@ -197,7 +197,7 @@ class model_plus_fermion(generic_potential.generic_potential):
         X = np.array(X)
         v = X[...,0]
         g = self.gX
-        mDP2 = np.array([(g**2.)*(v**2.)])
+        mDP2 = np.array([(g**2.)*(v**2.) * 4])
 
         if self.daisyResum == 1 or 2:
             # Temperature corrections for scalar (i.e. Higgs)
@@ -238,7 +238,7 @@ class model_plus_fermion(generic_potential.generic_potential):
         # mpsi2 = np.array([(y**2.)*(v**2.)])
         # M = mpsi2
 
-        mpsi2 = (y**2.) * (v**2.)    # shape (...,)
+        mpsi2 = (y**2.) * (v**2.) / 2.   # shape (...,)
         # put species on last axis (one fermion species)
         M = np.expand_dims(mpsi2, axis=-1)   # shape (..., 1)
         dof = np.array([4])
