@@ -1,9 +1,6 @@
 import numpy as np
 from scipy.integrate import cumulative_trapezoid, trapezoid
-try:
-    from scipy.integrate import cumulative_simpson
-except:
-    pass
+
 
 from utils import convert_units, s_SM, rho_SM, drho_SM_spline, d2rho_SM_spline
 from model import model
@@ -334,12 +331,9 @@ def refine_Tmin(T_min, V_physical, dV_physical, maxvev, log_10_precision = 6):
         return T_min
 
 
-def compute_logP_f(m, V_min_value, S3overT, v_w, units = 'GeV', cum_method='cumulative_simpson', R_0=0.0):
+def compute_logP_f(m, V_min_value, S3overT, v_w, units = 'GeV', cum_method='cumulative_trapezoid', R_0=0.0):
     # Method
-    if cum_method == 'cumulative_simpson':
-        cum_f = cumulative_simpson
-    else:
-        cum_f = cumulative_trapezoid 
+    cum_f = cumulative_trapezoid 
 
     V = m.Vtot
 
@@ -395,15 +389,12 @@ def N_bubblesH(Temps, Gamma, logP_f, H, ratio_V):
     return 4 * np.pi / 9 * np.flip(-integral)
 
 # False-vacuum bubbles
-def compute_Gamma_f(m, V_min_value, S3overT, v_w, logP_f, units='GeV', cum_method='cumulative_simpson'):
+def compute_Gamma_f(m, V_min_value, S3overT, v_w, logP_f, units='GeV', cum_method='cumulative_trapezoid'):
     '''
     Nucleation rate of false-vacuum bubbles as given by Eq. (12) in https://arxiv.org/pdf/2202.03439.
     '''
     # Select cumulative integration routine
-    if cum_method == 'cumulative_simpson':
-        cum_f = cumulative_simpson
-    else:
-        cum_f = cumulative_trapezoid
+    cum_f = cumulative_trapezoid
 
     V = m.Vtot
 

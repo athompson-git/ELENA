@@ -389,3 +389,213 @@ class model(generic_potential.generic_potential):
             dVdT -= self.V1T_from_X(X,T+2*T_eps, include_radiation)
             dVdT *= 1./(12*T_eps)
         return self.Vtot(X,T, include_radiation) - T * dVdT / 4.0
+
+
+
+
+# My own "Generic" model class for the potential
+# V(phi,T) = D (T^2 - T_0^2) phi^2 - (C + A T)
+class model_no_quantum(generic_potential.generic_potential):
+
+    def init(self, a=0.1, lam=0.061, c=0.249, d=0.596, vev=1.0, xstep=0.00005, Tstep=0.00005):
+        """
+          Setting up the parameters
+        """
+        
+        # Number of field-dimensions in the theory.
+        self.Ndim = 1
+
+        # Input parameters
+        self.a = a
+        self.lam = lam
+        self.c = c
+        self.d = d
+        self.vev = vev
+        
+        ###################
+        self.x_eps = xstep
+        self.T_eps = Tstep
+        #self.Tmax = Tmax
+        ##################
+        
+        # Model parameters
+        
+        self.T0Sq = (lam * vev**2 - 3*c*vev)/(2*d)
+
+        self.deriv_order = 2
+
+
+    def forbidPhaseCrit(self, X):
+        """
+        forbidPhaseCrit is useful to set if there is, for example, a Z2 symmetry
+        in the theory and you don't want to double-count all of the phases. In
+        this case, we're throwing away all phases whose zeroth (since python
+        starts arrays at 0) field component of the vev goes below -3. Note that
+        we don't want to set this to just going below zero, since we are
+        interested in phases with vevs exactly at 0, and floating point numbers
+        will never be accurate enough to ensure that these aren't slightly
+        negative.
+        """
+        return any([np.array([X])[...,0] < - 0.5e-6])
+
+    def V0(self, X):
+        """
+        This method defines the tree-level potential.
+        """
+        
+        X = np.asanyarray(X)
+        v = X[...,0]
+        r = self.d * (-self.T0Sq)*v**2 - (self.c)*v**3 + 0.25*self.lam*v**4
+
+        return r
+    
+    # Coleman-Weinberg potential
+    def Vcw(self, X):
+        # No CW potential
+        return 0.
+  
+    
+    def VDaisy(self, X, T):
+        # No Daisy diagrams
+        return 0.
+    
+    
+    def boson_massSq(self, X, T):
+        """
+        This method defines the squared boson mass spectrum of this theory. It is
+        returned with the respective fields' dofs and renormalization constants.
+        If the daisies are resummed
+        """
+            
+        M = 0.
+        M = 0.
+        dof = 0
+        # c_i = 3/2 for fermions and scalars, 5/6 for gauge bosons
+        c = 0
+        return M, dof, c
+
+    def fermion_massSq(self, X):
+        """
+        Since fermions are not included in this theory, their mass spectrum and
+        dofs are set to zero.
+        """
+        M = 0
+        dof = 0
+        return M, dof
+        
+    def Vct(self, X):
+        """
+        The counterterm lagranian is the same as the tree level lagrangian but
+        with masses and couplings replaced by counter term values (i.e. here
+        mu2 -> dmu2 and l -> dl). Assume potential of the form
+        V = - 1/2 mu**2 h**2 + lambda/4 h**4 where h is the investigated scalar field
+        """
+        X = np.array(X)
+        v = X[...,0]
+        #r = - self.dmu2*(v**2.)/2. + self.dl*(v**4.)/4.
+        return 0.
+        
+    
+    def Vtot(self, X, T, include_radiation=True):
+        """
+        The total finite temperature effective potential is calculated by adding
+        up the tree level potential, the one-loop-zero-T correction, the respective
+        counter terms, and (depending on the daisy resummation scheme) the one-loop-
+        temperature-dependent corrections.
+        
+        Parameters
+        ----------
+        X : array_like
+            Field value(s). 
+            Either a single point (with length `Ndim`), or an array of points.
+        T : float or array_like
+            The temperature. The shapes of `X` and `T`
+            should be such that ``X.shape[:-1]`` and ``T.shape`` are
+            broadcastable (that is, ``X[...,0]*T`` is a valid operation).
+        include_radiation : bool, optional
+            If False, this will drop all field-independent radiation
+            terms from the effective potential. Useful for calculating
+            differences or derivatives.
+        """
+        T = np.asanyarray(T, dtype=float)
+        X = np.asanyarray(X, dtype=float)
+
+        v = X[...,0]
+        y = self.d * (T**2 - self.T0Sq)*v**2 - (self.a*T + self.c)*v**3 + 0.25*self.lam*v**4
+
+        return y
+
+    def DVtot(self, X, T):
+        """
+        The finite temperature effective potential, but offset
+        such that V(0, T) = 0.
+        """
+        #X0 = np.zeros(self.Ndim)
+        return self.Vtot(X,T,False) - self.Vtot(X*0,T,False)  
+
+    def gradV(self, X, T):
+        """
+        Find the gradient of the full effective potential.
+
+        This uses :func:`helper_functions.gradientFunction` to calculate the
+        gradient using finite differences, with differences
+        given by `self.x_eps`. Note that `self.x_eps` is only used directly
+        the first time this function is called, so subsequently changing it
+        will not have an effect.
+        """
+        try:
+            f = self._gradV
+        except:
+            # Create the gradient function
+            self._gradV = helper_functions.gradientFunction(
+                self.Vtot, self.x_eps, self.Ndim, self.deriv_order)
+            f = self._gradV
+        # Need to add extra axes to T since extra axes get added to X in
+        # the helper function.
+        T = np.asanyarray(T)[...,np.newaxis,np.newaxis]
+        return f(X,T,False)
+    
+    def approxZeroTMin(self):
+
+        return [np.array([self.w])]  #   self.w       qua ci puoi mettere un valore, cosi' va pi
+    
+    def energyDensity(self,X,T,include_radiation=True):
+        T_eps = self.T_eps
+        if self.deriv_order == 2:
+            dVdT = self.V1T_from_X(X,T+T_eps, include_radiation)
+            dVdT -= self.V1T_from_X(X,T-T_eps, include_radiation)
+            dVdT *= 1./(2*T_eps)
+        else:
+            dVdT = self.V1T_from_X(X,T-2*T_eps, include_radiation)
+            dVdT -= 8*self.V1T_from_X(X,T-T_eps, include_radiation)
+            dVdT += 8*self.V1T_from_X(X,T+T_eps, include_radiation)
+            dVdT -= self.V1T_from_X(X,T+2*T_eps, include_radiation)
+            dVdT *= 1./(12*T_eps)
+        
+        return self.Vtot(X,T, include_radiation) - T * dVdT
+    
+    def dVdT(self, X, T0, include_radiation=False, include_SM = False, units = 'GeV'):
+        # first derivative of the potential with respect to temperature
+        X = np.asanyarray(X, dtype=float)
+        v = X[...,0]
+        return 2*self.d*T0*v**2 - self.a*v**3
+    
+    def d2VdT2(self, X, T0, include_radiation=False, include_SM = False, units = 'GeV'):
+        # second derivative of the potential with respect to temperature
+        X = np.asanyarray(X, dtype=float)
+        v = X[...,0]
+        return 2*self.d*v**2
+    
+    def e_minus_3p_div_4(self,X,T,include_radiation=True):
+        T_eps = self.T_eps
+        if self.deriv_order == 2:
+            dVdT = self.V1T_from_X(X,T+T_eps, include_radiation)
+            dVdT -= self.V1T_from_X(X,T-T_eps, include_radiation)
+            dVdT *= 1./(2*T_eps)
+        else:
+            dVdT = self.V1T_from_X(X,T-2*T_eps, include_radiation)
+            dVdT -= 8*self.V1T_from_X(X,T-T_eps, include_radiation)
+            dVdT += 8*self.V1T_from_X(X,T+T_eps, include_radiation)
+            dVdT -= self.V1T_from_X(X,T+2*T_eps, include_radiation)
+            dVdT *= 1./(12*T_eps)
+        return self.Vtot(X,T, include_radiation) - T * dVdT / 4.0
