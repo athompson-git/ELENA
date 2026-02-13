@@ -1,9 +1,11 @@
 
 import numpy as np
+from numpy.linalg import lstsq
 import matplotlib.pyplot as plt
 import sys
 import os
 import time
+from scipy.integrate import cumulative_trapezoid
 start_time = time.time()
 
 # Find the absolute path to the src directory relative to this script
@@ -16,7 +18,7 @@ if src_path not in sys.path:
 
 from temperatures import find_T_min, find_T_max, refine_Tmin, R_sepH
 from espinosa import Vt_vec
-from utils import interpolation_narrow
+from utils import interpolation_narrow, s_SM
 from temperatures import compute_logP_f, N_bubblesH, R_sepH, R0, compute_Gamma_f, R_meanH
 from GWparams import cs2, alpha_th_bar, beta, GW_SuperCooled
 from dof_interpolation import g_rho_spline
@@ -101,6 +103,7 @@ class FOPTGeneric:
         self.action_vec = None
         self.S3overT = None
         self.logP_f = None
+        self.ratio_V = None
 
         self.V_min_value = None
         self.phi0_min = None
@@ -114,6 +117,10 @@ class FOPTGeneric:
         self.Nf_perc_false = None
         self.H_perc_false = None
         self.nf_perc_false = None
+
+        self.alpha = None
+        self.beta = None
+        self.beta_by_Hn = None
 
         # Variables for PBH formation
         self.P_surv_pbh = None
@@ -197,6 +204,59 @@ class FOPTGeneric:
         self.phi0_min = phi0_min
         self.false_vev = false_vev
         self.true_vev = true_vev
+    
+
+    def cs2(self, T, true_vev):
+        speed2 = self.model.dVdT([true_vev], T, units = self.units) / (T * self.model.d2VdT2([true_vev], T, units = self.units))
+        return min(1/3, speed2.flatten())
+
+    def calc_alpha(self):
+        V_min_Temps = list(self.V_min_value.keys())
+        V_min_values = list(self.V_min_value.values())
+        false_vev_values = list(self.false_vev.values())
+        true_vev_values = list(self.true_vev.values())
+
+        V_min_value = -np.interp(self.T_perc, V_min_Temps, V_min_values)
+        false_vev = -np.interp(self.T_perc, V_min_Temps, false_vev_values)
+        true_vev = -np.interp(self.T_perc, V_min_Temps, true_vev_values)
+
+        delta_rho = - V_min_value \
+            -  self.T_perc * (self.model.dVdT([false_vev], self.T_perc, include_SM = True, units = self.units) \
+            - self.model.dVdT([true_vev], self.T_perc, include_SM = True, units = self.units))
+        delta_p = V_min_value / self.cs2(self.T_perc, true_vev)
+        wf = - self.T_perc * self.model.dVdT([false_vev], self.T_perc, units = self.units, include_SM = True)
+
+        return (delta_rho - delta_p) / (3 * wf)
+    
+    def calc_beta(self):
+        idx_nuc = np.argmin(np.abs(self.Temps - self.T_nuc))
+        idx_perc = np.argmin(np.abs(self.Temps - self.T_perc))
+
+        Gamma_n = self.Gamma_f_list[idx_nuc]
+        H_n = self.Hubble[idx_nuc]
+
+        times = cumulative_trapezoid(-np.flip((self.ratio_V[idx_perc:idx_nuc+1] / (3 * self.Hubble[idx_perc:idx_nuc+1]))),
+                                      np.flip(self.Temps[idx_perc:idx_nuc+1]), initial=0)
+        times = np.flip(times)
+
+        t = np.flip(H_n*times)
+        ft = np.flip(self.Gamma_f_list[idx_perc:idx_nuc+1]/Gamma_n)
+        ln_ft = np.log(ft)
+
+        # Create the design matrix
+        X = np.vstack((t, t**2)).T  # Stack t and t^2 as columns to create a design matrix
+
+        # Fit
+        coefs, _, _, _ = lstsq(X, ln_ft, rcond=None)  # Fit 'ln_ft' against 't' and 't^2'
+
+        # Extract coefficients
+        a_fit = coefs[0]  # Coefficient for the linear term (t)
+        beta_Hn = a_fit
+
+        self.beta = beta_Hn
+        self.beta_by_Hn = beta_Hn / H_n
+
+        return beta_Hn
 
     def calc_nucleation_percolation_completion(self):
         # In this routine, we will populate the arrays of logP_f and the associated temperature
@@ -255,12 +315,16 @@ class FOPTGeneric:
         self.T_perc_false = T_perc_false
         self.T_completion = T_completion
         self.Temps = Temps
+        self.ratio_V = ratio_V
         self.Gamma_f_list = Gamma_f_list
         self.logP_f = logP_f
         self.Nf_list = Nf_list
         self.Hubble = H
         self.R = R
         self.RH = RH
+        print("Checking alpha...")
+        self.alpha = self.calc_alpha()
+        print("alpha: ", self.alpha)
 
         if self.verbose:
             print("T_nuc: ", self.T_nuc)
@@ -309,7 +373,7 @@ class FOPTGeneric:
                                                    R_0=R_perc)
         mask_PfR = ~np.isnan(logP_f_R)
         logPf_Rperc = interpolation_narrow(Temps_[mask_PfR], logP_f_R[mask_PfR], self.T_perc)
-        self.P_surv_pbh = np.exp(logPf_Rperc)
+        self.P_surv_pbh = 1 - np.exp(logPf_Rperc)
         self.R_perc = R_perc
         
         if self.verbose:
@@ -324,29 +388,61 @@ class FOPTGeneric:
 
         fks = FKSCollapse(deltaV=abs(V_min_value_at_T_perc), sigma=self.sigma, vw=self.v_w)
         self.pbh_forms = fks.does_pbh_form(self.R_perc)
+        collapse_time = fks.get_collapse_time(self.R_perc) * np.sqrt(fks.get_HV2())
+        if collapse_time > 1.0:
+            self.pbh_forms = False
+
         self.m_pbh = fks.M0(self.R_perc)
 
         if self.verbose:
             print("pbh_forms: ", self.pbh_forms)
             print("m_pbh (g): ", self.m_pbh / GEV_PER_G)
 
-    def calc_pbh_abundance(self, verbose: bool = False):
-        normalization = np.power(HUBBLE0, 3) / (4 * np.pi * RHO_CRIT_GEV4 * OMEGA_DM / 3)
-        abundance = normalization * self.m_pbh * self.P_surv_pbh * self.Nf_perc_false
-        self.f_pbh = abundance
+    def calc_pbh_abundance(self, verbose: bool = False, v2=False):
+        if self.pbh_forms is False:
+            self.f_pbh = 0.0
+            return 0.0
         
-        if verbose:
-            print("normalization: ", normalization)
-            print("m_pbh (GeV): ", self.m_pbh)
-            print("P_surv_pbh: ", self.P_surv_pbh)
-            print("Nf_perc: ", self.Nf_perc)
-            print("Nf_perc_false: ", self.Nf_perc_false)
-            print("f_pbh: ", self.f_pbh)
+        if v2:
+            abundance = (8*np.pi / 3 / M_PL**2) / OMEGA_DM / HUBBLE0**2 * self.m_pbh * self.nf_perc_false
+            # Get reheat temperature using ELENA's method
+            T_reh = (1 + self.alpha)**(1/4) * self.T_perc
+            print("T_reh: ", T_reh)
+
+            self.f_pbh = abundance * S0_SM / s_SM(T_reh)
+            print("s_SM(T_reh): ", s_SM(T_reh))
+        else:
+            normalization = np.power(HUBBLE0, 3) / (4 * np.pi * RHO_CRIT_GEV4 * OMEGA_DM / 3)
+            abundance = normalization * self.m_pbh * self.P_surv_pbh * self.Nf_perc_false
+            self.f_pbh = abundance
+            
+            if verbose:
+                print("normalization: ", normalization)
+                print("m_pbh (GeV): ", self.m_pbh)
+                print("P_surv_pbh: ", self.P_surv_pbh)
+                print("Nf_perc: ", self.Nf_perc)
+                print("Nf_perc_false: ", self.Nf_perc_false)
+                print("f_pbh: ", self.f_pbh)
         
         return abundance
 
 
 
+
+"""
+PBH = FKSCollapse(DeltaV, sigma, point['v_w'])
+H_form, RH_form = point['H_perc_false'], point['R_mean_falseH_perc_false']
+R_star = RH_form / H_form
+t_coll = PBH.get_collapse_time(R_star)
+M_star = PBH.M0(R_star)
+# M_tp = PBH.get_M_at_zTP()
+# Calculate PBH abundance
+nf_form = point['nf_perc_false']
+nPBH_today = nf_form * S0_SM / s_SM(point['T_reh']) # entropy injection from reheating?
+OmegaCDMh2 = 0.120
+H0_h = 100 * 3.24078e-20 * (1 / 6.582119569e-25)**(-1)
+f_PBH = (8*np.pi / 3 / M_PL**2) / OmegaCDMh2 / H0_h**2 * M_star * nPBH_today
+"""
 
 
 
