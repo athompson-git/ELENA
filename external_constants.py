@@ -14,6 +14,8 @@ OMEGA_DM = 0.12
 RHO_CRIT_GEV_CM3 = 1.053672e-5 # GeV / cm^3
 RHO_CRIT_GEV4 = RHO_CRIT_GEV_CM3 * (HBARC**3)
 S0_SM = 2891.2  * HBARC**3 # cm^-3 --> GeV^3 entropy density today
+GSTAR_SM = 107.75
 
 # unit conversions
 GEV_PER_G = 5.6095887e23  # GeV/g
+
