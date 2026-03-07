@@ -243,6 +243,8 @@ def corner_plots_4param(json_filepath,
 
     # Make a colorbar (log or linear according to norm)
     cbar = fig.colorbar(sm, cax=cbar_ax)
+    # set tick label fontsize to 18
+    cbar.ax.tick_params(labelsize=18)
     if color_label is not None:
         cbar.set_label(color_label, fontsize=18)
     else:
