@@ -578,13 +578,30 @@ class model_no_quantum(generic_potential.generic_potential):
         # first derivative of the potential with respect to temperature
         X = np.asanyarray(X, dtype=float)
         v = X[...,0]
-        return 2*self.d*T0*v**2 - self.a*v**3
+        dVdT = 2*self.d*T0*v**2 - self.a*v**3
+        
+        if include_SM:
+            dVdT += - s_SM(T0, units=units)
+        
+        return dVdT
     
     def d2VdT2(self, X, T0, include_radiation=False, include_SM = False, units = 'GeV'):
         # second derivative of the potential with respect to temperature
         X = np.asanyarray(X, dtype=float)
         v = X[...,0]
-        return 2*self.d*v**2
+
+        d2V = 2*self.d*v**2
+        
+        if include_SM:
+            dV_s = lambda T : -s_SM(T, units=units)
+            T_eps = self.T_eps
+            
+            d2V_s = dV_s(T0+T_eps)
+            d2V_s -= dV_s(T0-T_eps)
+            d2V_s *= 1./(2*T_eps)
+            d2V += d2V_s
+
+        return d2V
     
     def e_minus_3p_div_4(self,X,T,include_radiation=True):
         T_eps = self.T_eps
