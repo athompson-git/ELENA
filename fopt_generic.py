@@ -285,7 +285,7 @@ class FOPTGeneric:
     def calc_nucleation_percolation_completion(self):
         # In this routine, we will populate the arrays of logP_f and the associated temperature
         # grid, determine T_nuc and T_perc, and T_completion, and check that the physical volume is decreasing
-
+        # calculation of alpha, beta, v_wall are done in this routine
         counter = 0
         while counter <= 1:
             logP_f, Temps, ratio_V, Gamma, H = compute_logP_f(self.model,
@@ -347,7 +347,8 @@ class FOPTGeneric:
         self.R = R
         self.RH = RH
         self.alpha = self.calc_alpha()
-        self.v_wall = self.calc_vw(self.T_perc, self.V_min_value[self.T_perc], self.alpha)
+        self.v_wall = self.calc_vw()
+        self.beta = self.calc_beta()
 
         if self.verbose:
             print("T_nuc: ", self.T_nuc)
