@@ -121,6 +121,7 @@ class FOPTGeneric:
         self.alpha = None
         self.beta = None
         self.beta_by_Hn = None
+        self.v_wall = None
 
         # Variables for PBH formation
         self.P_surv_pbh = None
@@ -209,8 +210,30 @@ class FOPTGeneric:
     def cs2(self, T, true_vev):
         speed2 = self.model.dVdT([true_vev], T, units = self.units) / (T * self.model.d2VdT2([true_vev], T, units = self.units))
         return min(1/3, speed2.flatten())
+    
+    def calc_vw(self) -> float:
+        # Determines v_wall once the history is computed and alpha is known
+        if not np.isfinite(self.alpha) or self.alpha <= 0:
+            return 1.0
+        
+        vJ = (np.sqrt(2*self.alpha/3 + self.alpha**2) + np.sqrt(1/3))/(1+self.alpha)
+        rho_r = np.pi**2 * GSTAR_SM * self.T_perc**4 / 30
+
+        V_min_Temps = list(self.V_min_value.keys())
+        V_min_values = list(self.V_min_value.values())
+
+        V_min_value_at_T_perc = -np.interp(self.T_perc, V_min_Temps, V_min_values)
+        
+        denom = self.alpha * rho_r
+        if denom <= 0 or V_min_value_at_T_perc < 0:
+            return 1.0
+        
+        v_candidate = np.sqrt(V_min_value_at_T_perc / denom)
+        self.v_wall = v_candidate if v_candidate < vJ else 1.0
+        return self.v_wall
 
     def calc_alpha(self):
+        # Computes alpha at T_perc once the history is computed
         V_min_Temps = list(self.V_min_value.keys())
         V_min_values = list(self.V_min_value.values())
         false_vev_values = list(self.false_vev.values())
@@ -229,6 +252,7 @@ class FOPTGeneric:
         return (delta_rho - delta_p) / (3 * wf)
     
     def calc_beta(self):
+        # Computes beta at T_nuc once the history is computed
         idx_nuc = np.argmin(np.abs(self.Temps - self.T_nuc))
         idx_perc = np.argmin(np.abs(self.Temps - self.T_perc))
 
@@ -322,9 +346,8 @@ class FOPTGeneric:
         self.Hubble = H
         self.R = R
         self.RH = RH
-        print("Checking alpha...")
         self.alpha = self.calc_alpha()
-        print("alpha: ", self.alpha)
+        self.v_wall = self.calc_vw(self.T_perc, self.V_min_value[self.T_perc], self.alpha)
 
         if self.verbose:
             print("T_nuc: ", self.T_nuc)
@@ -404,7 +427,8 @@ class FOPTGeneric:
             return 0.0
         
         if v2:
-            abundance = (8*np.pi / 3 / M_PL**2) / OMEGA_DM / HUBBLE0**2 * self.m_pbh * self.nf_perc_false
+            abundance = (8*np.pi / 3 / M_PL**2) / OMEGA_DM / HUBBLE0**2 \
+                * self.m_pbh * self.nf_perc_false
             # Get reheat temperature using ELENA's method
             T_reh = (1 + self.alpha)**(1/4) * self.T_perc
             print("T_reh: ", T_reh)
