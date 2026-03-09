@@ -12,75 +12,83 @@ test_params = {
 
 
 def test_point(point, verbose: bool = False):
+    none_return = None, None, None, None, None, None, None
     try:
         fopt = FOPTGeneric(point, verbose)
         print("FOPTGeneric initialized")
         if fopt.T0sq <= 0:
             print("T0sq is negative")
-            return None, None, None
+            return none_return
         if np.isnan(fopt.Tc):
             print("Tc is nan")
-            return None, None, None
+            return none_return
     except Exception as e:
         print(f"Error: {e}")
-        return None, None, None
+        return none_return
 
     try:
         fopt.calc_temperature_bounds(use_elena=False)
         print("Temperature bounds calculated")
     except Exception as e:
         print(f"Error: {e}")
-        return None, None, None
+        return none_return
 
     try:
         fopt.calc_action_over_T()
         print("Action over T calculated")
     except Exception as e:
         print(f"Error: {e}")
-        return None, None, None
-
+        return none_return
+    
     try:
         fopt.calc_nucleation_percolation_completion()
         print("Nucleation percolation completion calculated")
         if np.isnan(fopt.T_completion):
             print("T_completion is nan")
-            return None, None, None
+            return none_return
         if np.isnan(fopt.T_nuc):
             print("T_nuc is nan")
-            return None, None, None
+            return none_return
         if np.isnan(fopt.T_perc):
             print("T_perc is nan")
-            return None, None, None
+            return none_return
     except Exception as e:
         print(f"Error: {e}")
-        return None, None, None
+        return none_return
 
     try:
         fopt.calc_npatches()
         print("Number of patches calculated")
     except Exception as e:
         print(f"Error: {e}")
-        return None, None, None
+        return none_return
 
     try:
         fopt.calc_mean_bubble_size()
         print("Mean bubble size calculated")
     except Exception as e:
         print(f"Error: {e}")
-        return None, None, None
+        return none_return
 
     try:
-        fopt.calc_pbh_abundance(verbose=True)
+        fopt.calc_pbh_abundance(verbose=True, v2=True)
         print("PBH abundance calculated")
     except Exception as e:
         print(f"Error: {e}")
-        return None, None, None
+        return none_return
 
     print(f"Point: {point} passed")
     print("m_pbh (g): ", fopt.m_pbh / GEV_PER_G)
     print("f_pbh: ", fopt.f_pbh)
-    return fopt.T_perc, fopt.m_pbh / GEV_PER_G, fopt.f_pbh
-
+    print("beta/Hn: ", fopt.beta)
+    print("v_wall: ", fopt.v_wall)
+    return fopt.T_perc, \
+           fopt.m_pbh / GEV_PER_G, \
+           fopt.f_pbh, \
+           fopt.alpha, \
+           fopt.beta, \
+           fopt.v_wall, \
+           fopt.Tc
 
 def scan_params(vev: float, n_points: int, out_file_name: str = "scans/pbh_scan_1MeV.json", verbose: bool = False):
     
@@ -92,12 +100,12 @@ def scan_params(vev: float, n_points: int, out_file_name: str = "scans/pbh_scan_
         # c < vev * lam / 3 : keeps T0^2 positive
     
         for i in range(n_points):
-            d = np.random.uniform(0.1, 1.0)
-            lam = 10**np.random.uniform(-4, -1)
-            a_max = np.sqrt(lam * d)
-            a = 10**np.random.uniform(np.log10(a_max) - 2, np.log10(a_max))
-            log10_cmax = np.log10(vev * lam / 3)
-            c = 10**np.random.uniform(log10_cmax - 2, log10_cmax)
+            d = 0.1 #10**np.random.uniform(-2, 0)
+            lam = 10**np.random.uniform(-3, 0)
+            a_max = 0.8*np.sqrt(lam * d)
+            a = np.random.uniform(0.1*a_max, a_max)
+            c_max = vev * lam / 3
+            c = np.random.uniform(0.1*c_max, c_max)
             
             point = {
                 'a': a,
@@ -108,7 +116,7 @@ def scan_params(vev: float, n_points: int, out_file_name: str = "scans/pbh_scan_
             }
             print("################################################################################")
             print(f"On point i={i}")
-            T_perc, m_pbh, f_pbh = test_point(point, verbose)
+            T_perc, m_pbh, f_pbh, alpha, beta_by_Hn, v_wall, Tc = test_point(point, verbose)
             if T_perc is None or m_pbh is None or f_pbh is None:
                 continue
             
@@ -119,8 +127,12 @@ def scan_params(vev: float, n_points: int, out_file_name: str = "scans/pbh_scan_
                 'd': d,
                 'vev': vev,
                 'T_perc': T_perc,
+                'Tc': Tc,
+                'alpha': alpha,
+                'beta_by_Hn': beta_by_Hn,
+                'v_wall': v_wall,
                 'm_pbh': m_pbh,
-                'f_pbh': f_pbh
+                'f_pbh': f_pbh,                
             }
             json_object = json.dumps(param_dict)
             outfile.write(json_object)
@@ -133,4 +145,8 @@ if __name__ == "__main__":
     
     #test_point(test_params, verbose=True)
     
-    scan_params(vev=0.001, n_points=1000, out_file_name="scans/pbh_scan_1MeV_debug.json", verbose=True)
+    #scan_params(vev=0.001, n_points=5000, out_file_name="scans/fixed_quadratic/pbh_scan_1MeV.json", verbose=False)
+    #scan_params(vev=0.01, n_points=5000, out_file_name="scans/fixed_quadratic/pbh_scan_10MeV.json", verbose=False)
+    scan_params(vev=100.0, n_points=5000, out_file_name="scans/fixed_quadratic/pbh_scan_100GeV.json", verbose=False)
+    scan_params(vev=1000.0, n_points=5000, out_file_name="scans/fixed_quadratic/pbh_scan_1TeV.json", verbose=False)
+    scan_params(vev=10000.0, n_points=5000, out_file_name="scans/fixed_quadratic/pbh_scan_10TeV.json", verbose=False)
