@@ -172,7 +172,7 @@ def corner_plots_4param(json_filepath,
         betaByHstar = p["beta_by_Hn"]
         if betaByHstar is None or betaByHstar == 0.0:
             continue
-        vw = 1.0 # FIXME: should be vw
+        vw = p["v_wall"] #1.0 # FIXME: should be vw
         Tstar = p["T_perc"]
         gw = GravitationalWave()
         gw.alpha = alpha
@@ -180,8 +180,8 @@ def corner_plots_4param(json_filepath,
         gw.vw = vw
         gw.Tstar = Tstar
 
-        f_peak = gw.f_peak()
-        h2Omega = gw.omega(f_peak)
+        f_peak = gw.f_peak_sw()
+        h2Omega = gw.omega_sw(f_peak)
         param3_param = f_peak
         param4_param = h2Omega
 
@@ -625,7 +625,7 @@ bbo_h2Omega = np.array([float(item['y']) for item in bbo2])
 
 
 
-def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=None):
+def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=None, sound_wave_only=False):
 
     cmap = plt.get_cmap('tab20')
 
@@ -650,7 +650,7 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
             Tstar = p["T_perc"]
             alpha = p["alpha"]
             betaByHstar = p["beta_by_Hn"]
-            vw = 1.0 # FIXME: should be vw
+            vw = p["v_wall"] #1.0 # FIXME: should be vw
 
             if betaByHstar is None or betaByHstar == 0.0:
                 continue
@@ -660,15 +660,19 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
             gw.vw = vw
             gw.Tstar = Tstar
 
-            f_peak = gw.f_peak()
-            h2Omega = gw.omega(f_peak)
+            if sound_wave_only:
+                f_peak = gw.f_peak_sw()
+                h2Omega = gw.omega_sw(f_peak)
+            else:
+                f_peak = gw.f_peak()
+                h2Omega = gw.omega(f_peak)
 
             if curves:
-                if gw.f_peak() < 1e-10:
+                if f_peak < 1e-10:
                     continue
-                if gw.omega(gw.f_peak()) < 1e-30:
+                if gw.omega(f_peak) < 1e-30:
                     continue
-                if gw.omega(gw.f_peak()) > 1e-7:
+                if gw.omega(f_peak) > 1e-7:
                     continue
 
                 n_curves += 1
@@ -695,53 +699,53 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
     handles.extend(lines)
 
     # plot external limits
-    ax.fill_between(nanograv[:,0], nanograv[:,1], y2=1.0, color='silver')
-    ax.fill_between(aLIGO[:,0], aLIGO[:,1], y2=1.0, color='silver')
+    #ax.fill_between(nanograv[:,0], nanograv[:,1], y2=1.0, color='silver')
+    #ax.fill_between(aLIGO[:,0], aLIGO[:,1], y2=1.0, color='silver')
 
     # plot projections
     text_fontsize = 12
     ax.plot(lisa[:,0], lisa[:,1], linewidth=2.0)
-    ax.plot(muares[:,0], muares[:,1], linewidth=2.0)
+    #ax.plot(muares[:,0], muares[:,1], linewidth=2.0)
     #plt.plot(theia[:,0], theia[:,1])
     ax.plot(theia_f, theia_h2Omega, linewidth=2.0)
     #plt.plot(bbo[:,0], bbo[:,1])
-    ax.plot(bbo_f, bbo_h2Omega, linewidth=2.0)
+    #ax.plot(bbo_f, bbo_h2Omega, linewidth=2.0)
 
     
-    ax.plot(aplus_f, aplus_h2Omega, linewidth=2.0)
+    #ax.plot(aplus_f, aplus_h2Omega, linewidth=2.0)
     ax.plot(decigo_f, decigo_h2Omega, linewidth=2.0)
     ax.plot(alia_f, alia_h2Omega, linewidth=2.0)
-    ax.plot(ce_f, ce_h2Omega, linewidth=2.0)
-    #plt.plot(nanograv_f, nanograv_h2Omega, color='k')
+    #ax.plot(ce_f, ce_h2Omega, linewidth=2.0)
+    plt.plot(nanograv_f, nanograv_h2Omega, color='k')
     ax.plot(gaia_f, gaia_h2Omega, linewidth=2.0)
     #plt.plot(epta_f, epta_h2Omega, ls='dashed')
-    ax.plot(taiji_f, taiji_h2Omega, ls='dashed', linewidth=2.0)
-    ax.plot(tianqin_f, tianqin_h2Omega, ls='dashed', linewidth=2.0)
+    #ax.plot(taiji_f, taiji_h2Omega, ls='dashed', linewidth=2.0)
+    #ax.plot(tianqin_f, tianqin_h2Omega, ls='dashed', linewidth=2.0)
     
 
     ax.text(4.0e-9, 2.0e-15, "THEIA", rotation=45.0, fontsize=text_fontsize)
-    ax.text(5.0e-6, 5.0e-15, r"$\mu$Ares", rotation=-50.0, fontsize=text_fontsize)
+    #ax.text(5.0e-6, 5.0e-15, r"$\mu$Ares", rotation=-50.0, fontsize=text_fontsize)
     ax.text(1.0e-5, 1.0e-10, "LISA", rotation=-60.0, fontsize=text_fontsize)
-    ax.text(0.004, 6e-16, "BBO", rotation=-40.0, fontsize=text_fontsize)
-    ax.text(0.002, 5e-17, "ALIA", rotation=-50.0, fontsize=text_fontsize)
-    ax.text(10, 1e-13, "DECIGO", rotation=70.0, fontsize=text_fontsize)
-    ax.text(20.0, 5.0e-9, "aLIGO", rotation=90.0, fontsize=text_fontsize)
-    ax.text(4e-9, 2.0e-9, "NANOGrav", rotation=90.0, fontsize=text_fontsize)
-    ax.text(500.0, 2e-12, "CE", rotation=40.0, fontsize=text_fontsize)
+    #ax.text(0.004, 6e-16, "BBO", rotation=-40.0, fontsize=text_fontsize)
+    ax.text(0.5, 2e-11, "ALIA", rotation=60.0, fontsize=text_fontsize)
+    ax.text(10, 3e-12, "DECIGO", rotation=70.0, fontsize=text_fontsize)
+    #ax.text(20.0, 5.0e-9, "aLIGO", rotation=90.0, fontsize=text_fontsize)
+    ax.text(0.8e-9, 2.0e-8, "NANOGrav", rotation=0.0, fontsize=text_fontsize)
+    #ax.text(500.0, 2e-12, "CE", rotation=40.0, fontsize=text_fontsize)
     ax.text(3.3e-8, 4e-9, "Gaia", rotation=50.0, fontsize=text_fontsize)
-    ax.text(0.15, 4e-9, "Taiji", rotation=65.0, fontsize=text_fontsize)
-    ax.text(0.6, 1e-9, "TianQin", rotation=65.0, fontsize=text_fontsize)
-    ax.text(73, 4e-11, "A+", rotation=0.0, fontsize=text_fontsize)
+    #ax.text(0.15, 4e-9, "Taiji", rotation=65.0, fontsize=text_fontsize)
+    #ax.text(0.6, 1e-9, "TianQin", rotation=65.0, fontsize=text_fontsize)
+    #ax.text(73, 4e-11, "A+", rotation=0.0, fontsize=text_fontsize)
 
     fig.set_size_inches(10.0, 6.0)
-    plt.legend(handles=handles, loc="lower right", framealpha=1.0, fontsize=14)
+    plt.legend(handles=handles, loc="lower left", framealpha=1.0, fontsize=14)
 
     ax.set_xlabel(r"$f$ [Hz]", fontsize=16)
     ax.set_ylabel(r"max[$h^2 \Omega(f)$]", fontsize=16)
     ax.xaxis.set_tick_params(labelsize=16)
     ax.yaxis.set_tick_params(labelsize=16)
     plt.ylim((1e-21, 1e-7))
-    plt.xlim((1e-10, 1e4))
+    plt.xlim((1e-10, 1e2))
     plt.yscale('log')
     plt.xscale('log')
     plt.tight_layout()
