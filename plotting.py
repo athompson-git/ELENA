@@ -14,7 +14,7 @@ import numpy as np
 
 from external_constants import *
 from gw import GravitationalWave
-
+from dof_interpolation import g_rho_spline
 
 """
 Make a 6-plot 'cornerplot' over the parameters for a quartic potential as scatterplots
@@ -162,11 +162,16 @@ def corner_plots_4param(json_filepath,
         param2_param = p["f_pbh"]
 
         if fpbh_cut_lower:
-            if param2_param is None or param2_param <= 1e-80:
+            if p["f_pbh"] <= 1e-80:
                 continue
         if fpbh_cut_upper:
-            if param2_param is None or param2_param >= 1.0:
+            if p["f_pbh"] >= 1.0:
                 continue
+        if p["m_pbh"] >= 1e30:
+            continue
+
+        if p["m_pbh"] <= 1e14:
+            continue
 
         alpha = p["alpha"]
         betaByHstar = p["beta_by_Hn"]
@@ -174,14 +179,29 @@ def corner_plots_4param(json_filepath,
             continue
         vw = p["v_wall"] #1.0 # FIXME: should be vw
         Tstar = p["T_perc"]
-        gw = GravitationalWave()
-        gw.alpha = alpha
-        gw.betaByHstar = betaByHstar
-        gw.vw = vw
-        gw.Tstar = Tstar
+        Htp = p["H_perc"]
+        Rperc = p["R_perc"]
+        T_reh = Tstar * (1 + alpha)**(1/4)
 
-        f_peak = gw.f_peak_sw()
-        h2Omega = gw.omega_sw(f_peak)
+        # gravitational wave part TODO: fix
+        rf = 1.65e-5 * (T_reh/100.0) * np.power(g_rho_spline(T_reh)/100, 1/6) / Htp
+        rOmega = 1.67e-5 * np.power(100/g_rho_spline(T_reh), 1/3)
+        kappa_sw = alpha / (0.73 + 0.083*np.sqrt(alpha) + alpha)
+        Uf = 0.75 * alpha / (1 + alpha) * kappa_sw
+        tau_sw = np.min([1/Htp, Rperc / Uf])
+        f_sw = 1.5757 * rf / Rperc
+
+        h2Omega_sw_peak = 0.38 * (Htp * Rperc) * (Htp * tau_sw) * (kappa_sw * alpha / (1 + alpha))**2 * np.power(1 + 0.75, -7/2) * rOmega
+
+        # TODO: replace GW class with updated R_sep dependence
+        #gw = GravitationalWave()
+        #gw.alpha = alpha
+        #gw.betaByHstar = betaByHstar
+        #gw.vw = vw
+        #gw.Tstar = Tstar
+
+        f_peak = f_sw #gw.f_peak_sw()
+        h2Omega = h2Omega_sw_peak #gw.omega_sw(f_peak)
         param3_param = f_peak
         param4_param = h2Omega
 
@@ -243,6 +263,22 @@ def corner_plots_4param(json_filepath,
 
     # Make a colorbar (log or linear according to norm)
     cbar = fig.colorbar(sm, cax=cbar_ax)
+
+    # add text in a rounded block to the left of the colorbar: Generic Potential
+    axspecial = fig.add_subplot(spec[0, 1])
+    # remove axes completely
+    axspecial.set_frame_on(False)
+    axspecial.set_xticks([])
+    axspecial.set_yticks([])
+    # allow text to float without moving ax frame
+    props = dict(boxstyle='round', facecolor='white', alpha=1.0)
+    fig.text(0.38, 0.82,
+                   r"$V(\Phi,T) = D(T^2 - T_0^2)\Phi^2 - (AT + C)\Phi^3 + \frac{\lambda}{4}\Phi^4$",
+                   fontsize=18, color='black',
+                   bbox=props,
+                   horizontalalignment='left',
+                   verticalalignment='center') # allow text to float without moving ax frame
+
     # set tick label fontsize to 18
     cbar.ax.tick_params(labelsize=18)
     if color_label is not None:
@@ -332,27 +368,63 @@ def plot_2d(json_filepath, varstr1="m_pbh", varstr2 = "f_pbh",
     for i in range(len(param_json)):
         p = param_json[i]
 
-        var1 = p[varstr1]
-        var2 = p[varstr2]
+        
 
         a = p["a"]
         lam = p["lam"]
         d = p["d"]
         vev = p["vev"]
         c = p["c"]
+        alpha = p["alpha"]
+        Tstar = p["T_perc"]
         #if a > 0.9*np.sqrt(lam * d):
         #    continue
         #if c > 0.9 * vev * lam / 3:
         #    continue
         T0sq = (lam * vev**2 - 3*c*vev)/(2*d)
         Tc = (c*a + np.sqrt(lam*d*(c**2 + (lam*d - a**2)*T0sq)))/(lam*d - a**2)
+        Htp = p["H_perc"]
+        Rperc = p["R_perc"]
+
+        # gravitational wave part TODO: fix
+        T_reh = Tstar * (1 + alpha)**(1/4)
+        rf = 1.65e-5 * (T_reh/100.0) * np.power(g_rho_spline(T_reh)/100, 1/6) / Htp
+        rOmega = 1.67e-5 * np.power(100/g_rho_spline(T_reh), 1/3)
+        kappa_sw = alpha / (0.73 + 0.083*np.sqrt(alpha) + alpha)
+        Uf = 0.75 * alpha / (1 + alpha) * kappa_sw
+        tau_sw = np.min([1/Htp, Rperc / Uf])
+        f_sw = 1.5757 * rf / Rperc
+
+        h2Omega_sw_peak = 0.38 * (Htp * Rperc) * (Htp * tau_sw) * (kappa_sw * alpha / (1 + alpha))**2 * np.power(1 + 0.75, -7/2) * rOmega
+
+
+        if varstr1 == "T_reh":
+            var1 = T_reh
+        elif varstr1 == "f_sw":
+            var1 = f_sw
+        elif varstr1 == "h2Omega":
+            var1 = h2Omega_sw_peak
+        else:
+            var1 = p[varstr1]
+
+        if varstr2 == "T_reh":
+            var2 = T_reh
+        elif varstr2 == "f_sw":
+            var2 = f_sw
+        elif varstr2 == "h2Omega":
+            var2 = h2Omega_sw_peak
+        else:
+            var2 = p[varstr2]
         
         if color_param == "t_ratio":
             colvar = np.sqrt(T0sq)/Tc
         else:
             colvar = p[color_param] # np.sqrt(T0sq)/Tc #
 
-
+        # if imaginary, skip
+        if np.iscomplex(var1) or np.iscomplex(var2):
+            continue
+        
         if cuts is not None:
             skip = False
             for cut in cuts:
@@ -368,9 +440,9 @@ def plot_2d(json_filepath, varstr1="m_pbh", varstr2 = "f_pbh",
             continue
         if var2 is None:
             continue
-        if var1 <= 0.0:
+        if var1 <= 0.0 or np.iscomplex(var1):
             continue
-        if var2 <= 0.0:
+        if var2 <= 0.0 or np.iscomplex(var2):
             continue
         if colvar is None or colvar <= 0.0:
             continue
@@ -549,7 +621,7 @@ def plot_pbh(json_filepaths, varstr1="m_pbh", varstr2 = "f_pbh",
 
 # import external limits
 nanograv = np.genfromtxt("../limits/gws/nanograv.txt")
-lisa = np.genfromtxt("../limits/gws/lisa.txt")
+lisa = np.genfromtxt("../limits/gws/GW_sensitivity_curves/LISA_2.txt", delimiter=',')
 theia = np.genfromtxt("../limits/gws/theia.txt")
 muares = np.genfromtxt("../limits/gws/muares.txt")
 bbo = np.genfromtxt("../limits/gws/bbo_1709-02434.txt")
@@ -625,7 +697,13 @@ bbo_h2Omega = np.array([float(item['y']) for item in bbo2])
 
 
 
-def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=None, sound_wave_only=False):
+def plot_gw_spectra_from_json(json_filepaths,
+                              curves=True,
+                              labels=[],
+                              save_name=None,
+                              sound_wave_only=False,
+                              plot_valid_pbh=False,
+                              mpbh_range=[1e14, 1e30]):
 
     cmap = plt.get_cmap('tab20')
 
@@ -642,6 +720,8 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
 
         f_peaks = []
         h2Omegas = []
+        f_peak_valid_pbh = []
+        h2Omega_valid_pbh = []
 
         n_curves = 0
         for i in range(len(param_json)):
@@ -650,7 +730,26 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
             Tstar = p["T_perc"]
             alpha = p["alpha"]
             betaByHstar = p["beta_by_Hn"]
-            vw = p["v_wall"] #1.0 # FIXME: should be vw
+            vw = p["v_wall"]
+            Htp = p["H_perc"]
+            Rperc = p["R_perc"]
+
+            if p["m_pbh"] >= mpbh_range[1]:
+                continue
+            if p["m_pbh"] <= mpbh_range[0]:
+                continue
+
+            # gravitational wave part TODO: fix
+            T_reh = Tstar * (1 + alpha)**(1/4)
+            rf = 1.65e-5 * (T_reh/100.0) * np.power(g_rho_spline(T_reh)/100, 1/6) / Htp
+            rOmega = 1.67e-5 * np.power(100/g_rho_spline(T_reh), 1/3)
+            kappa_sw = alpha / (0.73 + 0.083*np.sqrt(alpha) + alpha)
+            Uf = 0.75 * alpha / (1 + alpha) * kappa_sw
+            tau_sw = np.min([1/Htp, Rperc / Uf])
+            f_sw = 1.5757 * rf / Rperc
+
+            h2Omega_sw_peak = 0.38 * (Htp * Rperc) * (Htp * tau_sw) * (kappa_sw * alpha / (1 + alpha))**2 * np.power(1 + 0.75, -7/2) * rOmega
+
 
             if betaByHstar is None or betaByHstar == 0.0:
                 continue
@@ -666,6 +765,9 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
             else:
                 f_peak = gw.f_peak()
                 h2Omega = gw.omega(f_peak)
+
+            f_peak = f_sw
+            h2Omega = h2Omega_sw_peak
 
             if curves:
                 if f_peak < 1e-10:
@@ -686,14 +788,22 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
                 f_peaks.append(f_peak)
                 h2Omegas.append(h2Omega)
 
+                if p["f_pbh"] < 1.0:
+                    f_peak_valid_pbh.append(f_peak)
+                    h2Omega_valid_pbh.append(h2Omega)
+
         ax.scatter(f_peaks, h2Omegas, color=cmap(2*j+1), marker='.',
-                    alpha=1.0, edgecolors=cmap(2*j), linewidth=1.0, s=70)
+                    alpha=1.0, linewidth=1.0, s=70)
+        
+        if plot_valid_pbh:
+            ax.scatter(f_peak_valid_pbh, h2Omega_valid_pbh, facecolor=cmap(2*j), marker='.',
+                        alpha=1.0, linewidth=1.0, s=70)
 
     # add legends
     handles, ls = plt.gca().get_legend_handles_labels()
     lines = []
     for i in range(len(labels)):
-        line1 = Line2D([0], [0], color=cmap(2*i), marker='.', label=labels[i], linestyle='none')
+        line1 = Line2D([0], [0], color=cmap(2*i), marker='o', label=labels[i], linestyle='none')
         lines.append(line1)
 
     handles.extend(lines)
@@ -702,46 +812,65 @@ def plot_gw_spectra_from_json(json_filepaths, curves=True, labels=[], save_name=
     #ax.fill_between(nanograv[:,0], nanograv[:,1], y2=1.0, color='silver')
     #ax.fill_between(aLIGO[:,0], aLIGO[:,1], y2=1.0, color='silver')
 
+    # Set the grids
+    ax.grid(True, linestyle='solid', linewidth=0.5, alpha=0.6, color='gray')
+
+    for line in plt.gca().xaxis.get_gridlines():
+        line.set_dash_capstyle('round')
+
+    for line in plt.gca().yaxis.get_gridlines():
+        line.set_dash_capstyle('round')
+
     # plot projections
     text_fontsize = 12
-    ax.plot(lisa[:,0], lisa[:,1], linewidth=2.0)
+    projection_lw = 3.0
+    nanograv_color = 'gold'
+    theia_color = 'purple'
+    lisa_color = 'salmon'
+    alia_color = 'sienna'
+    decigo_color = 'royalblue'
+    gaia_color = 'green'
+    ax.plot(lisa[:,0], lisa[:,1], linewidth=projection_lw, color=lisa_color)
     #ax.plot(muares[:,0], muares[:,1], linewidth=2.0)
     #plt.plot(theia[:,0], theia[:,1])
-    ax.plot(theia_f, theia_h2Omega, linewidth=2.0)
+    ax.plot(theia_f, theia_h2Omega, linewidth=projection_lw, color=theia_color)
     #plt.plot(bbo[:,0], bbo[:,1])
     #ax.plot(bbo_f, bbo_h2Omega, linewidth=2.0)
 
     
     #ax.plot(aplus_f, aplus_h2Omega, linewidth=2.0)
-    ax.plot(decigo_f, decigo_h2Omega, linewidth=2.0)
-    ax.plot(alia_f, alia_h2Omega, linewidth=2.0)
+    ax.plot(decigo_f, decigo_h2Omega, linewidth=projection_lw, color=decigo_color)
+    ax.plot(alia_f, alia_h2Omega, linewidth=projection_lw, color=alia_color)
     #ax.plot(ce_f, ce_h2Omega, linewidth=2.0)
-    plt.plot(nanograv_f, nanograv_h2Omega, color='k')
-    ax.plot(gaia_f, gaia_h2Omega, linewidth=2.0)
+    ax.plot(nanograv_f, nanograv_h2Omega, linewidth=projection_lw, color=nanograv_color)
+    ax.plot(gaia_f, gaia_h2Omega, linewidth=projection_lw, color=gaia_color)
     #plt.plot(epta_f, epta_h2Omega, ls='dashed')
     #ax.plot(taiji_f, taiji_h2Omega, ls='dashed', linewidth=2.0)
     #ax.plot(tianqin_f, tianqin_h2Omega, ls='dashed', linewidth=2.0)
     
 
-    ax.text(4.0e-9, 2.0e-15, "THEIA", rotation=45.0, fontsize=text_fontsize)
+    ax.text(5e-10, 7e-14, "THEIA", rotation=0.0, fontsize=text_fontsize, color=theia_color)
     #ax.text(5.0e-6, 5.0e-15, r"$\mu$Ares", rotation=-50.0, fontsize=text_fontsize)
-    ax.text(1.0e-5, 1.0e-10, "LISA", rotation=-60.0, fontsize=text_fontsize)
+    ax.text(1.0e-1, 1.0e-10, "LISA", rotation=60.0, fontsize=text_fontsize, color=lisa_color)
     #ax.text(0.004, 6e-16, "BBO", rotation=-40.0, fontsize=text_fontsize)
-    ax.text(0.5, 2e-11, "ALIA", rotation=60.0, fontsize=text_fontsize)
-    ax.text(10, 3e-12, "DECIGO", rotation=70.0, fontsize=text_fontsize)
+    ax.text(0.5, 2e-11, "ALIA", rotation=60.0, fontsize=text_fontsize, color=alia_color)
+    ax.text(10, 3e-12, "DECIGO", rotation=60.0, fontsize=text_fontsize, color=decigo_color)
     #ax.text(20.0, 5.0e-9, "aLIGO", rotation=90.0, fontsize=text_fontsize)
-    ax.text(0.8e-9, 2.0e-8, "NANOGrav", rotation=0.0, fontsize=text_fontsize)
+    ax.text(0.8e-9, 2.0e-8, "NANOGrav", rotation=0.0, fontsize=text_fontsize, color=nanograv_color)
     #ax.text(500.0, 2e-12, "CE", rotation=40.0, fontsize=text_fontsize)
-    ax.text(3.3e-8, 4e-9, "Gaia", rotation=50.0, fontsize=text_fontsize)
+    ax.text(5e-10, 5e-10, "Gaia", rotation=0.0, fontsize=text_fontsize, color=gaia_color)
     #ax.text(0.15, 4e-9, "Taiji", rotation=65.0, fontsize=text_fontsize)
     #ax.text(0.6, 1e-9, "TianQin", rotation=65.0, fontsize=text_fontsize)
     #ax.text(73, 4e-11, "A+", rotation=0.0, fontsize=text_fontsize)
 
     fig.set_size_inches(10.0, 6.0)
-    plt.legend(handles=handles, loc="lower left", framealpha=1.0, fontsize=14)
+    plt.legend(handles=handles, loc="lower left", framealpha=1.0, fontsize=14,
+               title=r"$\langle \Phi \rangle$",
+               title_fontsize=16,
+               ncol=2)
 
-    ax.set_xlabel(r"$f$ [Hz]", fontsize=16)
-    ax.set_ylabel(r"max[$h^2 \Omega(f)$]", fontsize=16)
+    ax.set_xlabel(r"$f_{\rm GW}$ [Hz]", fontsize=16)
+    ax.set_ylabel(r"max[$h^2 \Omega_{\rm sw}(f)$]", fontsize=16)
     ax.xaxis.set_tick_params(labelsize=16)
     ax.yaxis.set_tick_params(labelsize=16)
     plt.ylim((1e-21, 1e-7))
