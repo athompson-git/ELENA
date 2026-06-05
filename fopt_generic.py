@@ -8,6 +8,42 @@ import time
 from scipy.integrate import cumulative_trapezoid
 start_time = time.time()
 
+def _log_trapz(y, x):
+    """
+    Trapezoidal-style integration that assumes y(x) is LOG-LINEAR within
+    each cell, i.e. y(t) = y_i * exp(k_i * (t - x_i)) where k_i picks up
+    log(y_{i+1}/y_i)/dx. This is exact for exponential integrands and
+    dramatically more accurate than plain trapezoidal when y changes by
+    orders of magnitude per grid cell (as Gamma * exp(-cum_ratio_V) does
+    just above T_perc).
+
+    Falls back to ordinary trapezoidal contribution for cells where
+    either endpoint is non-positive or both endpoints are equal.
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    if len(x) < 2:
+        return 0.0
+    total = 0.0
+    for i in range(len(x) - 1):
+        dx = x[i + 1] - x[i]
+        yi = y[i]
+        yj = y[i + 1]
+        if yi <= 0.0 or yj <= 0.0 or not np.isfinite(yi) or not np.isfinite(yj):
+            total += 0.5 * (yi + yj) * dx
+            continue
+        if yi == yj:
+            total += yi * dx
+            continue
+        # log-linear cell: integrate y_i * exp(k * (t - x_i))
+        log_ratio = np.log(yj / yi)
+        if abs(log_ratio) < 1e-12:
+            total += yi * dx
+        else:
+            total += (yj - yi) * dx / log_ratio
+    return total
+
+
 # Find the absolute path to the src directory relative to this script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 src_path = os.path.join(script_dir, 'src')
@@ -19,10 +55,10 @@ if src_path not in sys.path:
 from temperatures import find_T_min, find_T_max, refine_Tmin, R_sepH
 from espinosa import Vt_vec
 from utils import interpolation_narrow, s_SM
-from temperatures import compute_logP_f, N_bubblesH, R_sepH, R0, compute_Gamma_f, R_meanH
+from temperatures import compute_logP_f, N_bubblesH, R_sepH, R0, compute_Gamma_f, R_meanH, nf_vals_at
 from GWparams import cs2, alpha_th_bar, beta, GW_SuperCooled
 from dof_interpolation import g_rho_spline
-from model import model_no_quantum
+from model import model_no_quantum, model_bl
 
 from pbh import FKSCollapse
 from external_constants import *
@@ -54,50 +90,51 @@ class FOPTGeneric:
     fopt.calc_mean_bubble_size()
     fopt.calc_pbh_abundance()
     """
-    def __init__(self, point, verbose = False):
+    def __init__(self, point, verbose = False, model="polynomial"):
         self.verbose = verbose
 
         # init Veff params
         self.point = point
-        self.a = point['a']
-        self.lam = point['lam']
-        self.c = point['c']
-        self.d = point['d']
-        self.vev = point['vev']
+        if model == "polynomial":
+            self.a = point['a']
+            self.lam = point['lam']
+            self.c = point['c']
+            self.d = point['d']
+            self.vev = point['vev']
+            self.model = model_no_quantum(a=point['a'], lam=point['lam'], c=point['c'], d=point['d'], vev=point['vev'])
+            self.T0sq = (self.lam * self.vev**2 - 3*self.c*self.vev)/(2*self.d)
+        elif model == "BL":
+            self.gBL = point['gBL']
+            self.vev = point['vev']
+            self.model = model_bl(gBL=point['gBL'], vev=point['vev'])
 
         # Derive Veff quantities
-        self.T0sq = (self.lam * self.vev**2 - 3*self.c*self.vev)/(2*self.d)
         self.Tc = self.get_Tc()
         self.phi_crit = self.phi_critical()
         self.sigma = self.wall_tension()
 
         # Init ELENA quantities
         self.units = 'GeV'
-        self.model = model_no_quantum(a=point['a'], lam=point['lam'], c=point['c'], d=point['d'], vev=point['vev'])
         self.V = self.model.DVtot # This is the scalar potential shifted such that the false vacuum is located at ϕ = 0 for each value of the temperature
         self.dV = self.model.gradV # This is the gradient of the scalar potential
-        self.v_w = 1.0
-        self.n_temp_points = 100
+        self.v_wall = 1.0
+        self.n_temp_points = 400
         self.T_max = self.Tc
         self.T_min = None
         self.maxvev = None
 
         if self.verbose:
-            print("a: ", self.a)
-            print("lam: ", self.lam)
-            print("c: ", self.c)
-            print("d: ", self.d)
-            print("vev: ", self.vev)
+            print(point)
             print("T_max (Tc): ", self.Tc)
             print("T_min (T0): ", np.sqrt(self.T0sq))
             print("Tc: ", self.Tc)
             print("phi_critical: ", self.phi_crit)
             print("wall_tension: ", self.sigma)
-            print("T0sq: ", self.T0sq)
 
         # Arrays over temperature grid
         self.Temps = None
         self.Gamma_f_list = None
+        self.Gamma = None
         self.Nf_list = None
         self.Hubble = None
         self.action_vec = None
@@ -121,7 +158,6 @@ class FOPTGeneric:
         self.alpha = None
         self.beta = None
         self.beta_by_Hn = None
-        self.v_wall = None
 
         # Variables for PBH formation
         self.P_surv_pbh = None
@@ -194,10 +230,29 @@ class FOPTGeneric:
             else:
                 return None
         
-        temperatures = np.linspace(self.T_min, self.T_max, self.n_temp_points)
+        # Do not sample at T_max = Tc: Vt_vec's barrier check intermittently
+        # fails on the topmost grid point as lambda shifts, flipping
+        # n_barrier_temps between 98 and 99 and changing S3overT_max by
+        # orders of magnitude (log evidence: 10^7 vs 1.5e5). That rescales
+        # the logP_f integrals and produces the residual m_pbh oscillation.
+        span = self.T_max - self.T_min
+        dT_grid = span / max(self.n_temp_points - 1, 1)
+        T_upper = self.T_max - dT_grid
+        temperatures = np.linspace(self.T_min, T_upper, self.n_temp_points)
         action_vec = np.vectorize(action_over_T)
 
         action_vec(temperatures)
+
+        # The lowest-T point where a barrier first appears has S3/T ~ 0.15
+        # (log evidence: S3overT_min while physical values are > 20 one cell
+        # up). It poisons the logP_f cliff and shifts as lambda moves.
+        _sorted_T = sorted(S3overT.keys())
+        while _sorted_T and S3overT[_sorted_T[0]] < 1.0 and len(_sorted_T) > 10:
+            t0 = _sorted_T[0]
+            for _d in (S3overT, V_min_value, phi0_min, true_vev, false_vev):
+                _d.pop(t0, None)
+            _sorted_T = sorted(S3overT.keys())
+
         #self.temperatures = np.array([T for T in temperatures if T in S3overT])
         self.action_vec = action_vec
         self.S3overT = S3overT
@@ -205,7 +260,6 @@ class FOPTGeneric:
         self.phi0_min = phi0_min
         self.false_vev = false_vev
         self.true_vev = true_vev
-    
 
     def cs2(self, T, true_vev):
         speed2 = self.model.dVdT([true_vev], T, units = self.units) / (T * self.model.d2VdT2([true_vev], T, units = self.units))
@@ -229,7 +283,7 @@ class FOPTGeneric:
             return 1.0
         
         v_candidate = np.sqrt(V_min_value_at_T_perc / denom)
-        self.v_wall = v_candidate if v_candidate < vJ else 1.0
+        self.v_wall = v_candidate if v_candidate < vJ else (1.0 + vJ)/2
         return self.v_wall
 
     def calc_alpha(self):
@@ -250,6 +304,24 @@ class FOPTGeneric:
         wf = - self.T_perc * self.model.dVdT([false_vev], self.T_perc, units = self.units, include_SM = True)
 
         return (delta_rho - delta_p) / (3 * wf)
+    
+    def c_alpha_inf(self, T):
+        v_true = self.high_vev[T]
+        v_false = self.false_vev[T]
+        Dm2_photon = 3 * self.g**2 * (v_true**2 - v_false**2)
+        Dm2_scalar = 3 * self.lambda_ * (v_true**2 - v_false**2) 
+        numerator = (Dm2_photon + Dm2_scalar) * T**2 / 24
+        rho_tot = - T * 3 * (self.dp.dVdT(v_false, T, include_radiation=True, include_SM = True, units = self.units) ) / 4
+        rho_DS = - T * 3 * (self.dp.dVdT(v_false, T, include_radiation=True, include_SM = False, units = self.units) ) / 4
+        return numerator/ rho_tot, numerator / rho_DS
+
+    def c_alpha_eq(self, T):
+        v_true = self.high_vev[T]
+        v_false = self.false_vev[T]
+        numerator = (self.g**2 * 3 * (self.g * (v_true - v_false)) * T**3)
+        rho_tot = - T * 3 * (self.dp.dVdT(v_false, T, include_radiation=True, include_SM = True, units = self.units) ) / 4
+        rho_DS = - T * 3 * (self.dp.dVdT(v_false, T, include_radiation=True, include_SM = False, units = self.units) ) / 4
+        return numerator / rho_tot, numerator / rho_DS
     
     def calc_beta(self):
         # Computes beta at T_nuc once the history is computed
@@ -282,7 +354,7 @@ class FOPTGeneric:
 
         return beta_Hn
 
-    def calc_nucleation_percolation_completion(self):
+    def calc_nucleation_percolation_completion(self, Pf_true_choice = 0.71, Pf_false_choice = 0.29):
         # In this routine, we will populate the arrays of logP_f and the associated temperature
         # grid, determine T_nuc and T_perc, and T_completion, and check that the physical volume is decreasing
         # calculation of alpha, beta, v_wall are done in this routine
@@ -291,13 +363,13 @@ class FOPTGeneric:
             logP_f, Temps, ratio_V, Gamma, H = compute_logP_f(self.model,
                                                               self.V_min_value,
                                                               self.S3overT,
-                                                              self.v_w,
+                                                              self.v_wall,
                                                               units = self.units,
                                                               cum_method= 'None')
             Gamma_f_list, _, ratio_V, _, H = compute_Gamma_f(self.model,
                                                              self.V_min_value,
                                                              self.S3overT,
-                                                             self.v_w,
+                                                             self.v_wall,
                                                              logP_f,
                                                              units=self.units,
                                                              cum_method='cumulative_simpson')
@@ -313,8 +385,8 @@ class FOPTGeneric:
             mask_nH = ~np.isnan(nH)
             T_nuc = interpolation_narrow(np.log(nH[mask_nH]), Temps[mask_nH], 0)
             mask_Pf = ~np.isnan(logP_f)
-            T_perc = interpolation_narrow(logP_f[mask_Pf], Temps[mask_Pf], np.log(0.71))
-            T_perc_false = interpolation_narrow(logP_f[mask_Pf], Temps[mask_Pf], np.log(0.29))
+            T_perc = interpolation_narrow(logP_f[mask_Pf], Temps[mask_Pf], np.log(Pf_true_choice))
+            T_perc_false = interpolation_narrow(logP_f[mask_Pf], Temps[mask_Pf], np.log(Pf_false_choice))
             T_completion = interpolation_narrow(logP_f[mask_Pf], Temps[mask_Pf], np.log(0.01))
 
             idx_compl = np.max([np.argmin(np.abs(Temps - T_completion)), 1])
@@ -340,6 +412,7 @@ class FOPTGeneric:
         self.T_completion = T_completion
         self.Temps = Temps
         self.ratio_V = ratio_V
+        self.Gamma = Gamma
         self.Gamma_f_list = Gamma_f_list
         self.logP_f = logP_f
         self.Nf_list = Nf_list
@@ -347,6 +420,7 @@ class FOPTGeneric:
         self.R = R
         self.RH = RH
         self.alpha = self.calc_alpha()
+        self.v_wall_gamma_f = self.v_wall
         self.v_wall = self.calc_vw()
         self.beta = self.calc_beta()
 
@@ -356,18 +430,105 @@ class FOPTGeneric:
             print("T_perc_false: ", self.T_perc_false)
             print("T_completion: ", self.T_completion)
 
+    def _augment_grid_at(self, T_target, *fields):
+        """
+        Build the ascending temperature grid that starts exactly at T_target
+        and includes every existing grid point strictly above it, along with
+        the field arrays linearly-interpolated at T_target. This lets us
+        compute integrals from T_target to T_max without the lower limit
+        having to land on a grid point.
+
+        Returns (T_arr, *augmented_field_arrays).
+        """
+        Temps = self.Temps
+        if T_target >= Temps[-1]:
+            return (None,) * (1 + len(fields))
+        mask = Temps > T_target
+        T_above = Temps[mask]
+        T_arr = np.concatenate([[T_target], T_above])
+        out = [T_arr]
+        for arr in fields:
+            val_at = float(np.interp(T_target, Temps, arr))
+            out.append(np.concatenate([[val_at], arr[mask]]))
+        return tuple(out)
+
+    def _R_sepH_at(self, T_target):
+        """
+        Compute the mean bubble separation R = n^(-1/3) AT a specific
+        temperature T_target by integrating directly from T_target to T_max
+        with T_target inserted as the lower integration limit.
+
+        The integrand `Gamma * exp(logP_f) * ratio_V/(3H) * exp(-cum_rv)`
+        decays approximately exponentially in T just above T_perc (Gamma
+        drops with S3 growing roughly linearly). Plain trapezoidal
+        over-estimates exponential decay by ~ (k*dx)/(1 - exp(-k*dx))
+        per cell, and that factor swings with where T_target lands
+        relative to the grid -- which manifests as a smooth-looking
+        oscillation in R(lam). We use a log-linear-per-cell rule
+        (`_log_trapz`) which is exact for exponential integrands.
+        """
+        if not np.isfinite(T_target):
+            return np.nan
+        aug = self._augment_grid_at(T_target, self.Gamma, self.ratio_V,
+                                    self.logP_f, self.Hubble)
+        if aug[0] is None:
+            return np.nan
+        T_arr, G_arr, rv_arr, lp_arr, H_arr = aug
+        cum_rv = cumulative_trapezoid(rv_arr, x=T_arr, initial=0)
+        f_ext = G_arr * rv_arr * np.exp(lp_arr) / (3.0 * H_arr)
+        f1 = f_ext * np.exp(-cum_rv)
+        # Log-linear per-cell quadrature (exact for exponential integrand)
+        n_at = _log_trapz(f1, T_arr)
+        if not (n_at > 0) or not np.isfinite(n_at):
+            return np.nan
+        return n_at ** (-1.0 / 3.0)
+
+    def _Nf_list_at(self, T_target):
+        """
+        Compute Nf_list AT T_target by integrating from T_target to T_max
+        with the lower limit inserted on the grid. Unlike the previous
+        ``_N_bubblesH_at`` path, ``Nf_vals`` (the 4-fold false-vacuum
+        integral) is recomputed at each augmented temperature rather than
+        linearly interpolating ``self.Gamma_f_list``.
+        """
+        if not np.isfinite(T_target):
+            return np.nan
+
+        logP_t = np.log(np.clip(1.0 - np.exp(self.logP_f), 1e-300, None))
+        aug = self._augment_grid_at(T_target, logP_t, self.ratio_V,
+                                    self.Hubble, self.logP_f)
+        if aug[0] is None:
+            return np.nan
+        T_arr, logP_t_arr, rv_arr, H_arr, logP_f_arr = aug
+
+        S3_Temps = np.array(sorted(self.S3overT.keys()))
+        S3_vals = np.array([self.S3overT[t] for t in S3_Temps])
+        S3_on_T = np.interp(T_arr, S3_Temps, S3_vals)
+        Gamma_arr = (T_arr ** 4 * (S3_on_T / (2.0 * np.pi)) ** (3.0 / 2.0)
+                     * np.exp(-S3_on_T))
+
+        v_w = getattr(self, "v_wall_gamma_f", self.v_wall)
+        nf_vals_arr = np.zeros_like(T_arr)
+        for k in range(len(T_arr)):
+            nf_vals_arr[k] = nf_vals_at(T_arr[k:], H_arr[k:], rv_arr[k:],
+                                        Gamma_arr[k:], logP_f_arr[k], v_w)
+
+        integrand = nf_vals_arr * np.exp(logP_t_arr) * rv_arr / H_arr ** 4
+        val = _log_trapz(integrand, T_arr)
+        return 4.0 * np.pi / 9.0 * val
+
     def calc_npatches(self):
-        mask_Gf = ~np.isnan(self.Gamma_f_list)
-        #Gammaf_perc = interpolation_narrow(self.Temps[mask_Gf], self.Gamma_f_list[mask_Gf], self.T_perc)
-        Nf_perc = interpolation_narrow(self.Temps[mask_Gf], self.Nf_list[mask_Gf], self.T_perc)
-        H_perc = interpolation_narrow(self.Temps[mask_Gf], self.Hubble[mask_Gf], self.T_perc)
+        # Direct integration at T_perc / T_perc_false with recomputed Nf_vals
+        # on the augmented grid (avoids interpolating Gamma_f_list across the
+        # percolation cliff).
+        Nf_perc       = self._Nf_list_at(self.T_perc)
+        Nf_perc_false = self._Nf_list_at(self.T_perc_false)
+        # H is smooth in T, plain linear interpolation is fine.
+        H_perc        = float(np.interp(self.T_perc,       self.Temps, self.Hubble))
+        H_perc_false  = float(np.interp(self.T_perc_false, self.Temps, self.Hubble))
+
         Hubble_vol_perc = 4*np.pi / 3 * H_perc**(-3)
         nf_perc = Nf_perc / Hubble_vol_perc # number density of false-vacuum bubbles
-
-        # Same quantities, but evaluated when P_f(T_perc_false) = 0.29
-        #Gammaf_perc_false = interpolation_narrow(self.Temps[mask_Gf], self.Gamma_f_list[mask_Gf], self.T_perc_false)
-        Nf_perc_false = interpolation_narrow(self.Temps[mask_Gf], self.Nf_list[mask_Gf], self.T_perc_false)
-        H_perc_false = interpolation_narrow(self.Temps[mask_Gf], self.Hubble[mask_Gf], self.T_perc_false)
         Hubble_vol_perc_false = 4*np.pi / 3 * H_perc_false**(-3)
         nf_perc_false = Nf_perc_false / Hubble_vol_perc_false # number density of false-vacuum bubbles
 
@@ -387,11 +548,17 @@ class FOPTGeneric:
             print("nf_perc_false: ", self.nf_perc_false)
 
     def calc_mean_bubble_size(self):
-        R_perc = interpolation_narrow(self.Temps, self.R, self.T_perc)
+        # Compute R_perc by directly integrating from T_perc to T_max, with
+        # T_perc inserted as the lower limit. The per-grid-point self.R has
+        # near-discontinuous growth across the percolation cliff (R[i+1]/R[i]
+        # ~ 10-15 within a couple of grid cells of T_perc), so any 2-point
+        # interpolation -- linear OR log -- snaps as T_perc crosses grid
+        # points. Direct integration is smooth in T_perc.
+        R_perc = self._R_sepH_at(self.T_perc)
         logP_f_R, Temps_, _, _, _ = compute_logP_f(self.model,
                                                    self.V_min_value,
                                                    self.S3overT,
-                                                   v_w = self.v_w,
+                                                   v_w = self.v_wall,
                                                    units = self.units,
                                                    cum_method= 'None',
                                                    R_0=R_perc)
@@ -410,7 +577,7 @@ class FOPTGeneric:
 
         V_min_value_at_T_perc = -np.interp(self.T_perc, V_min_Temps, V_min_values)
 
-        fks = FKSCollapse(deltaV=abs(V_min_value_at_T_perc), sigma=self.sigma, vw=self.v_w)
+        fks = FKSCollapse(deltaV=abs(V_min_value_at_T_perc), sigma=self.sigma, vw=self.v_wall)
         self.pbh_forms = fks.does_pbh_form(self.R_perc)
         collapse_time = fks.get_collapse_time(self.R_perc) * np.sqrt(fks.get_HV2())
         if collapse_time > 1.0:

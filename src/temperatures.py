@@ -389,6 +389,60 @@ def N_bubblesH(Temps, Gamma, logP_f, H, ratio_V):
     return 4 * np.pi / 9 * np.flip(-integral)
 
 # False-vacuum bubbles
+def nf_vals_at(T_slice, H_slice, ratio_slice, Gamma_slice, logP_f_at_lower, v_w,
+               cum_f=cumulative_trapezoid):
+    """
+    4-fold false-vacuum bubble integral for a single lower temperature limit.
+
+    ``T_slice`` is the ascending temperature grid from the lower limit to T_c.
+    ``logP_f_at_lower`` is logP_f evaluated at the lower limit (first point of
+    the slice), matching ``logP_f[i]`` in ``compute_Gamma_f``.
+    """
+    if len(T_slice) < 2:
+        return 0.0
+
+    cum_ratio = cum_f(ratio_slice, x=T_slice, initial=0.0)
+    a_over_aT = np.exp(cum_ratio / 3.0)
+
+    n_slice = len(T_slice)
+    inner_vals = np.zeros(n_slice)
+
+    for k in range(n_slice):
+        if k == 0:
+            inner_vals[k] = 0.0
+            continue
+
+        exp_factors = np.exp((cum_ratio[k] - cum_ratio[:k + 1]) / 3.0)
+        integrand_inner = (ratio_slice[:k + 1] / (3.0 * H_slice[:k + 1])) * exp_factors
+        inner_cum = cum_f(integrand_inner, x=T_slice[:k + 1], initial=0.0)
+        inner_vals[k] = inner_cum[-1]
+
+    f_array = (ratio_slice / (3.0 * H_slice)) * (inner_vals**2) * Gamma_slice * a_over_aT
+
+    cum_f_full = cum_f(f_array, x=T_slice, initial=0.0)
+    total_end = cum_f_full[-1]
+    prev = np.concatenate(([0.0], cum_f_full[:-1]))
+    J3 = total_end - prev
+
+    product1 = f_array * J3
+    cum_product1 = cum_f(product1, x=T_slice, initial=0.0)
+    total_end_p1 = cum_product1[-1]
+    prev_p1 = np.concatenate(([0.0], cum_product1[:-1]))
+    J2 = total_end_p1 - prev_p1
+
+    product2 = f_array * J2
+    cum_product2 = cum_f(product2, x=T_slice, initial=0.0)
+    total_end_p2 = cum_product2[-1]
+    prev_p2 = np.concatenate(([0.0], cum_product2[:-1]))
+    J1 = total_end_p2 - prev_p2
+
+    product3 = f_array * J1
+    cum_product3 = cum_f(product3, x=T_slice, initial=0.0)
+    final_val = cum_product3[-1]
+
+    return 32 * np.pi**4 * v_w**9 * np.exp(logP_f_at_lower) * final_val
+
+
 def compute_Gamma_f(m, V_min_value, S3overT, v_w, logP_f, units='GeV', cum_method='cumulative_trapezoid'):
     '''
     Nucleation rate of false-vacuum bubbles as given by Eq. (12) in https://arxiv.org/pdf/2202.03439.
@@ -424,74 +478,8 @@ def compute_Gamma_f(m, V_min_value, S3overT, v_w, logP_f, units='GeV', cum_metho
 
     # Loop over lower-limit index i; Temps[i] is the T in integral
     for i in range(steps - 1):
-        # Work on the slice Temps[i:] which runs from T up to T_c
-        T_slice = Temps[i:]
-        H_slice = H[i:]
-        ratio_slice = ratio_V[i:]
-        Gamma_slice = Gamma_list[i:]
-
-        # cumulative integral of ratio from T to T' : cum_ratio[j] = ∫_{T}^{T_j} ratio_V dT
-        cum_ratio = cum_f(ratio_slice, x=T_slice, initial=0.0)
-
-        # Precompute a(T_j)/a(T) = exp(cum_ratio/3)
-        a_over_aT = np.exp(cum_ratio / 3.0)
-
-        # --- Compute the inner integral for each candidate T_j in the slice:
-        # inner_j = ∫_{T}^{T_j} dT' [ (1/(3 H(T'))) * ratio_V(T') * a(T_j)/a(T') ]
-        # Note: a(T_j)/a(T') = exp( (cum_ratio[j] - cum_ratio[j']) / 3 )
-        n_slice = len(T_slice)
-        inner_vals = np.zeros(n_slice)
-
-        # We'll compute inner_vals[k] for k = 0..n_slice-1 (k=0 -> integral from T to T -> zero)
-        # loop over k (index of T_j)
-        for k in range(n_slice):
-            if k == 0:
-                inner_vals[k] = 0.0
-                continue
-
-            # integrand over indices 0..k inclusive (T' in [T, T_j])
-            # build array of exponent factors: exp((cum_ratio[k] - cum_ratio[0:k+1]) / 3)
-            exp_factors = np.exp((cum_ratio[k] - cum_ratio[:k + 1]) / 3.0)
-
-            integrand_inner = (ratio_slice[:k + 1] / (3.0 * H_slice[:k + 1])) * exp_factors
-            # cumulative integral from T to T_j -> last element of cumulative integral
-            inner_cum = cum_f(integrand_inner, x=T_slice[:k + 1], initial=0.0)
-            inner_vals[k] = inner_cum[-1]
-
-        # Now form f_array[k] = (1/(3 H_k)) * ratio_k * (inner_vals[k])^2 * Gamma_k * a(T_k)/a(T)
-        f_array = (ratio_slice / (3.0 * H_slice)) * (inner_vals**2) * Gamma_slice * a_over_aT
-
-        # The 4-fold iterated integral over ordered variables T1<=T2<=T3<=T4:
-        # I = ∫_{T}^{Tc} dT1 f(T1) ∫_{T1}^{Tc} dT2 f(T2) ∫_{T2}^{Tc} dT3 f(T3) ∫_{T3}^{Tc} dT4 f(T4)
-
-        # Step A: J3[j] = ∫_{T_j}^{Tc} f(T4) dT4  (integral of f from each point to end)
-        cum_f_full = cum_f(f_array, x=T_slice, initial=0.0)  # cumulative from start T to each T_j
-        total_end = cum_f_full[-1]
-        # integral from position j to end = total_end - cum_f_full[j-1] (with j-1 -> 0 handling)
-        prev = np.concatenate(([0.0], cum_f_full[:-1]))
-        J3 = total_end - prev  # J3 has same length as f_array
-
-        # Step B: J2[j] = ∫_{T_j}^{Tc} f(T2) * J3(T2) dT2
-        product1 = f_array * J3
-        cum_product1 = cum_f(product1, x=T_slice, initial=0.0)
-        total_end_p1 = cum_product1[-1]
-        prev_p1 = np.concatenate(([0.0], cum_product1[:-1]))
-        J2 = total_end_p1 - prev_p1
-
-        # Step C: J1[j] = ∫_{T_j}^{Tc} f(T3) * J2(T3) dT3
-        product2 = f_array * J2
-        cum_product2 = cum_f(product2, x=T_slice, initial=0.0)
-        total_end_p2 = cum_product2[-1]
-        prev_p2 = np.concatenate(([0.0], cum_product2[:-1]))
-        J1 = total_end_p2 - prev_p2
-
-        # Step D: Final value = ∫_{T}^{Tc} f(T1) * J1(T1) dT1
-        product3 = f_array * J1
-        cum_product3 = cum_f(product3, x=T_slice, initial=0.0)
-        final_val = cum_product3[-1]
-
-        # Store the result for lower-limit Temps[i]
-        Nf_vals[i] = 32*np.pi**4 * v_w**9 * np.exp(logP_f[i]) * final_val
+        Nf_vals[i] = nf_vals_at(Temps[i:], H[i:], ratio_V[i:], Gamma_list[i:],
+                                logP_f[i], v_w, cum_f=cum_f)
 
     return Nf_vals, Temps, ratio_V, Gamma_list, H
 
