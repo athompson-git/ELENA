@@ -6,6 +6,8 @@ import json
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import matplotlib.colors as mcolors
+from scipy.interpolate import griddata
+
 from matplotlib.pylab import rc
 rc('font', **{'family': 'serif', 'serif': ['Computer Modern']})
 rc('text', usetex=True)
@@ -15,6 +17,47 @@ import numpy as np
 from external_constants import *
 from gw import GravitationalWave
 from dof_interpolation import g_rho_spline
+
+
+
+
+"""
+Helper function for drawing alpha contours
+"""
+def _add_alpha_contours(ax, xs, ys, alpha_list, alpha_contours, n=100):
+    """Interpolate alpha onto a log-spaced grid and draw contours."""
+    # Filter out non-positive and non-finite values before taking log
+    xs = np.array(xs)
+    ys = np.array(ys)
+    alpha_list = np.array(alpha_list)
+
+    mask = (xs > 0) & (ys > 0) & np.isfinite(xs) & np.isfinite(ys) & np.isfinite(alpha_list)
+    xs, ys, alpha_list = xs[mask], ys[mask], alpha_list[mask]
+
+    if len(xs) < 4:  # not enough points to interpolate
+        return
+
+    log_xs = np.log10(xs)
+    log_ys = np.log10(ys)
+
+    grid_lx, grid_ly = np.meshgrid(
+        np.linspace(log_xs.min(), log_xs.max(), n),
+        np.linspace(log_ys.min(), log_ys.max(), n)
+    )
+    grid_alpha = griddata(
+        (log_xs, log_ys), alpha_list,
+        (grid_lx, grid_ly), method='cubic'
+    )
+    for alpha_val in alpha_contours:
+        ax.contour(
+            10**grid_lx, 10**grid_ly, grid_alpha,
+            levels=[alpha_val], colors='silver', linestyles='--'
+        )
+
+
+
+
+
 
 """
 Make a 6-plot 'cornerplot' over the parameters for a quartic potential as scatterplots
@@ -140,7 +183,8 @@ def corner_plots_4param(json_filepath,
                         fpbh_cut_lower=False,
                         fpbh_cut_upper=False,
                         color_label="",
-                        save_name=None):
+                        save_name=None,
+                        alpha_contours=[]):
     
 
     fig = plt.figure(constrained_layout=True, figsize=[12.0, 8.0])
@@ -155,6 +199,7 @@ def corner_plots_4param(json_filepath,
     param3_list = []
     param4_list = []
     color_param_list = []
+    alpha_list = []
 
     for i in range(len(param_json)):
         p = param_json[i]
@@ -212,6 +257,7 @@ def corner_plots_4param(json_filepath,
         param3_list.append(param3_param)
         param4_list.append(param4_param)
         color_param_list.append(color_param)
+        alpha_list.append(alpha)
 
     param_choice = np.array(color_param_list)
     param_min = (min(param_choice))
@@ -221,7 +267,7 @@ def corner_plots_4param(json_filepath,
         norm = mcolors.LogNorm(vmin=param_min, vmax=param_max)
     else:
         norm = mcolors.Normalize(vmin=param_min, vmax=param_max)
-    
+        
     ax1 = fig.add_subplot(spec[0, 0])
     ax1.scatter(param1_list, param2_list, marker=".", c=param_choice, norm=norm, alpha=0.8)
     ax1.set_ylabel(r"$f_{\rm PBH}$", fontsize=18)
@@ -257,6 +303,24 @@ def corner_plots_4param(json_filepath,
     ax6.set_xlabel(r"$f_{\rm GW}$ [Hz]", fontsize=18)
     ax6.set_yscale('log')
     ax6.set_xscale('log')
+
+    # draw alpha contours
+    if len(alpha_contours) > 0:
+        alpha_arr = np.array(alpha_list)
+        p1 = np.array(param1_list)
+        p2 = np.array(param2_list)
+        p3 = np.array(param3_list)
+        p4 = np.array(param4_list)
+
+        #_add_alpha_contours(ax1, p1, p2, alpha_arr, alpha_contours)
+        _add_alpha_contours(ax2, p1, p3, alpha_arr, alpha_contours)  # was using wrong params
+        #_add_alpha_contours(ax3, p2, p3, alpha_arr, alpha_contours)
+        _add_alpha_contours(ax4, p1, p4, alpha_arr, alpha_contours)
+        #_add_alpha_contours(ax5, p2, p4, alpha_arr, alpha_contours)
+        _add_alpha_contours(ax6, p3, p4, alpha_arr, alpha_contours)
+        ax2.text(1e24, 2e-3, r"$\alpha = 1$", color='silver', fontsize=18)
+        # add short horizontal dashed line next to the label
+        ax2.axhline(3e-3, color='silver', linestyle='--', linewidth=1, xmin=0.85, xmax=0.95)
 
     cbar_ax = fig.add_axes([0.8, 0.4, 0.03, 0.6])
     sm = plt.cm.ScalarMappable(cmap=plt.cm.viridis, norm=norm)
@@ -812,6 +876,15 @@ def plot_gw_spectra_from_json(json_filepaths,
     #ax.fill_between(nanograv[:,0], nanograv[:,1], y2=1.0, color='silver')
     #ax.fill_between(aLIGO[:,0], aLIGO[:,1], y2=1.0, color='silver')
 
+    # plot the inset box with the potential label
+    props = dict(boxstyle='round', facecolor='white', alpha=1.0)
+    ax.text(1e-4, 1e-8,
+            r"$V(\Phi,T) = D(T^2 - T_0^2)\Phi^2 - (AT + C)\Phi^3 + \frac{\lambda}{4}\Phi^4$",
+            fontsize=14, color='black',
+            bbox=props,
+            horizontalalignment='left',
+            verticalalignment='center') # allow text to float without moving ax frame
+
     # Set the grids
     ax.grid(True, linestyle='solid', linewidth=0.5, alpha=0.6, color='gray')
 
@@ -854,7 +927,7 @@ def plot_gw_spectra_from_json(json_filepaths,
     ax.text(1.0e-1, 1.0e-10, "LISA", rotation=60.0, fontsize=text_fontsize, color=lisa_color)
     #ax.text(0.004, 6e-16, "BBO", rotation=-40.0, fontsize=text_fontsize)
     ax.text(0.5, 2e-11, "ALIA", rotation=60.0, fontsize=text_fontsize, color=alia_color)
-    ax.text(10, 3e-12, "DECIGO", rotation=60.0, fontsize=text_fontsize, color=decigo_color)
+    ax.text(8, 3e-12, "DECIGO", rotation=63.0, fontsize=text_fontsize, color=decigo_color)
     #ax.text(20.0, 5.0e-9, "aLIGO", rotation=90.0, fontsize=text_fontsize)
     ax.text(0.8e-9, 2.0e-8, "NANOGrav", rotation=0.0, fontsize=text_fontsize, color=nanograv_color)
     #ax.text(500.0, 2e-12, "CE", rotation=40.0, fontsize=text_fontsize)
