@@ -8,41 +8,6 @@ import time
 from scipy.integrate import cumulative_trapezoid
 start_time = time.time()
 
-def _log_trapz(y, x):
-    """
-    Trapezoidal-style integration that assumes y(x) is LOG-LINEAR within
-    each cell, i.e. y(t) = y_i * exp(k_i * (t - x_i)) where k_i picks up
-    log(y_{i+1}/y_i)/dx. This is exact for exponential integrands and
-    dramatically more accurate than plain trapezoidal when y changes by
-    orders of magnitude per grid cell (as Gamma * exp(-cum_ratio_V) does
-    just above T_perc).
-
-    Falls back to ordinary trapezoidal contribution for cells where
-    either endpoint is non-positive or both endpoints are equal.
-    """
-    y = np.asarray(y, dtype=float)
-    x = np.asarray(x, dtype=float)
-    if len(x) < 2:
-        return 0.0
-    total = 0.0
-    for i in range(len(x) - 1):
-        dx = x[i + 1] - x[i]
-        yi = y[i]
-        yj = y[i + 1]
-        if yi <= 0.0 or yj <= 0.0 or not np.isfinite(yi) or not np.isfinite(yj):
-            total += 0.5 * (yi + yj) * dx
-            continue
-        if yi == yj:
-            total += yi * dx
-            continue
-        # log-linear cell: integrate y_i * exp(k * (t - x_i))
-        log_ratio = np.log(yj / yi)
-        if abs(log_ratio) < 1e-12:
-            total += yi * dx
-        else:
-            total += (yj - yi) * dx / log_ratio
-    return total
-
 
 # Find the absolute path to the src directory relative to this script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -54,7 +19,7 @@ if src_path not in sys.path:
 
 from temperatures import find_T_min, find_T_max, refine_Tmin, R_sepH
 from espinosa import Vt_vec
-from utils import interpolation_narrow, s_SM
+from utils import interpolation_narrow, s_SM, log_trapz as _log_trapz
 from temperatures import compute_logP_f, N_bubblesH, R_sepH, R0, compute_Gamma_f, R_meanH, nf_vals_at
 from GWparams import cs2, alpha_th_bar, beta, GW_SuperCooled
 from dof_interpolation import g_rho_spline
@@ -589,32 +554,26 @@ class FOPTGeneric:
             print("pbh_forms: ", self.pbh_forms)
             print("m_pbh (g): ", self.m_pbh / GEV_PER_G)
 
-    def calc_pbh_abundance(self, verbose: bool = False, v2=False):
+    def calc_pbh_abundance(self, verbose: bool = False):
         if self.pbh_forms is False:
             self.f_pbh = 0.0
             return 0.0
         
-        if v2:
-            abundance = (8*np.pi / 3 / M_PL**2) / OMEGA_DM / HUBBLE0**2 \
-                * self.m_pbh * self.nf_perc_false
-            # Get reheat temperature using ELENA's method
-            T_reh = (1 + self.alpha)**(1/4) * self.T_perc
-            print("T_reh: ", T_reh)
+        abundance = (8*np.pi / 3 / M_PL**2) / OMEGA_DM / HUBBLE0**2 \
+            * self.m_pbh * self.nf_perc_false
+        # Get reheat temperature using ELENA's method
+        T_reh = (1 + self.alpha)**(1/4) * self.T_perc
+        print("T_reh: ", T_reh)
 
-            self.f_pbh = abundance * S0_SM / s_SM(T_reh)
-            print("s_SM(T_reh): ", s_SM(T_reh))
-        else:
-            normalization = np.power(HUBBLE0, 3) / (4 * np.pi * RHO_CRIT_GEV4 * OMEGA_DM / 3)
-            abundance = normalization * self.m_pbh * self.P_surv_pbh * self.Nf_perc_false
-            self.f_pbh = abundance
-            
-            if verbose:
-                print("normalization: ", normalization)
-                print("m_pbh (GeV): ", self.m_pbh)
-                print("P_surv_pbh: ", self.P_surv_pbh)
-                print("Nf_perc: ", self.Nf_perc)
-                print("Nf_perc_false: ", self.Nf_perc_false)
-                print("f_pbh: ", self.f_pbh)
+        self.f_pbh = abundance * S0_SM / s_SM(T_reh)
+        print("s_SM(T_reh): ", s_SM(T_reh))
+        
+        if verbose:
+            print("m_pbh (GeV): ", self.m_pbh)
+            print("P_surv_pbh: ", self.P_surv_pbh)
+            print("Nf_perc: ", self.Nf_perc)
+            print("Nf_perc_false: ", self.Nf_perc_false)
+            print("f_pbh: ", self.f_pbh)
         
         return abundance
 
