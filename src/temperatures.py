@@ -1,8 +1,8 @@
 import numpy as np
-from scipy.integrate import cumulative_trapezoid, trapezoid
+from scipy.integrate import cumulative_trapezoid, cumulative_simpson, trapezoid
 
 
-from utils import convert_units, s_SM, rho_SM, drho_SM_spline, d2rho_SM_spline
+from utils import convert_units, s_SM, rho_SM, drho_SM_spline, d2rho_SM_spline, log_trapz, log_cumulative_trapz
 from model import model
 from espinosa import Vt_vec
 from dof_interpolation import g_rho
@@ -331,68 +331,135 @@ def refine_Tmin(T_min, V_physical, dV_physical, maxvev, log_10_precision = 6):
         return T_min
 
 
-def compute_logP_f(m, V_min_value, S3overT, v_w, units = 'GeV', cum_method='cumulative_trapezoid', R_0=0.0):
-    # Method
-    cum_f = cumulative_trapezoid 
-
+def _barrier_thermo_fields(m, V_min_value, S3overT, units='GeV'):
+    """Thermodynamic arrays on the barrier temperature grid."""
     V = m.Vtot
-
-    Temps = np.array(sorted(V_min_value.keys(), reverse=False))  # Sorted x values
-    steps = len(Temps)
+    Temps = np.array(sorted(V_min_value.keys(), reverse=False))
     T_step = (Temps[-1] - Temps[0]) * 1e-3
-    
-    # dVdT = lambda phi, T : (V(np.array([phi]), T + T_step) - V(np.array([phi]), T - T_step)) / (2. * T_step) - s_SM(T)
-    # d2VdT2 = lambda phi, T : (dVdT(phi, T + T_step) - dVdT(phi, T - T_step)) / (2. * T_step)
 
     dvdT = lambda phi, T: (V(np.array([phi]), T + T_step) - V(np.array([phi]), T - T_step)) / (2. * T_step)
-    dVdT = lambda phi, T: dvdT(phi, T) - drho_SM_spline(T) / 3 # negative entropy density
-    d2VdT2 = lambda phi, T : (dvdT(phi, T + T_step) - dvdT(phi, T - T_step)) / (2. * T_step) - d2rho_SM_spline(T) / 3 # negative ds/dT
+    dVdT = lambda phi, T: dvdT(phi, T) - drho_SM_spline(T) / 3
+    d2VdT2 = lambda phi, T: (dvdT(phi, T + T_step) - dvdT(phi, T - T_step)) / (2. * T_step) - d2rho_SM_spline(T) / 3
 
-    # Hubble
-    # e_vacuum = np.array([-V_min_value[t] for t in Temps])
-    e_vacuum = np.array([-V_min_value[t] - t*dVdT(0, t) for t in Temps]).flatten() # technically should be multiplied by P_f
+    e_vacuum = np.array([-V_min_value[t] - t * dVdT(0, t) for t in Temps]).flatten()
     e_radiation = np.pi**2 * g_rho(Temps / convert_units[units]) * Temps**4 / 30
     H = np.sqrt((e_vacuum + e_radiation) / 3) / (M_pl * convert_units[units])
-    
-    # Action and Decay width
+
     S3_T = np.array([S3overT[t] for t in Temps])
-    Gamma_list = Temps**4 * (S3_T / (2 * np.pi))**(3/2) * np.exp(-S3_T)
-    
-    # V''(phi_f, T) / V'(phi_f, T)
+    Gamma_list = Temps**4 * (S3_T / (2 * np.pi))**(3 / 2) * np.exp(-S3_T)
     ratio_V = np.array([d2VdT2(0, T) / dVdT(0, T) for T in Temps]).flatten()
-    # NOTE: HAD TO FLATTEN THIS AND e_vacuum FOR B-L POTENTIAL FOR SOME REASON
-    
-    # To store result
-    logP_f = np.zeros_like(Temps)
-    
-    # Function for the first integral
     f_ext = ratio_V * Gamma_list / H
 
+    return Temps, H, Gamma_list, ratio_V, f_ext
+
+
+def _logP_f_single_slice(T_slice, rv_slice, H_slice, f_ext_slice, v_w,
+                         R_0=0.0, integrator='log_trapz'):
+    """One logP_f integral from the lower limit (first point of T_slice) to T_c."""
+    if len(T_slice) < 2:
+        return 0.0
+
+    cum_f = cumulative_trapezoid
+    use_log = integrator == 'log_trapz'
+
+    cum_ratio_V = cum_f(rv_slice, x=T_slice, initial=0)
+
+    f1 = rv_slice / H_slice * np.exp(cum_ratio_V / 3.0)
+    if use_log:
+        cum_f1 = log_cumulative_trapz(f1, T_slice, initial=0) + R_0
+    else:
+        cum_f1 = cum_f(f1, x=T_slice, initial=0) + R_0
+
+    f2 = f_ext_slice * np.exp(-cum_ratio_V) * cum_f1 ** 3
+    if use_log:
+        cum_f2_end = log_trapz(f2, T_slice)
+    else:
+        cum_f2_end = cum_f(f2, x=T_slice, initial=0)[-1]
+
+    return -4.0 / 243.0 * np.pi * v_w ** 3 * cum_f2_end
+
+
+def logP_f_at_T(m, V_min_value, S3overT, v_w, T_lower, units='GeV',
+                R_0=0.0, integrator='log_trapz'):
+    """
+    Evaluate logP_f at an arbitrary lower temperature T_lower by integrating
+    from T_lower to T_c. Uses the barrier grid above T_lower with linearly
+    interpolated thermodynamic fields at T_lower (not interpolated logP_f).
+    """
+    if not np.isfinite(T_lower):
+        return np.nan
+
+    Temps, H, Gamma_list, ratio_V, f_ext = _barrier_thermo_fields(
+        m, V_min_value, S3overT, units=units)
+
+    if T_lower >= Temps[-1]:
+        return 0.0
+
+    mask = Temps > T_lower
+    if not np.any(mask):
+        return 0.0
+
+    T_slice = np.concatenate([[T_lower], Temps[mask]])
+    H_slice = np.concatenate([[float(np.interp(T_lower, Temps, H))], H[mask]])
+    rv_slice = np.concatenate([[float(np.interp(T_lower, Temps, ratio_V))], ratio_V[mask]])
+    f_ext_slice = np.concatenate([[float(np.interp(T_lower, Temps, f_ext))], f_ext[mask]])
+
+    return _logP_f_single_slice(T_slice, rv_slice, H_slice, f_ext_slice, v_w,
+                                R_0=R_0, integrator=integrator)
+
+
+def compute_logP_f(m, V_min_value, S3overT, v_w, units='GeV',
+                   cum_method='cumulative_trapezoid', R_0=0.0,
+                   integrator='log_trapz'):
+    """
+    Compute logP_f(T) on the barrier temperature grid.
+
+    integrator='log_trapz' (default): log-linear quadrature for the f1 and
+    f2 integrands (exponential near percolation). ratio_V cumulative integral
+    stays plain trapezoidal, matching the R_sepH_at pattern.
+    integrator='trapz': legacy plain cumulative_trapezoid everywhere.
+    """
+    Temps, H, Gamma_list, ratio_V, f_ext = _barrier_thermo_fields(
+        m, V_min_value, S3overT, units=units)
+    steps = len(Temps)
+
+    logP_f = np.zeros_like(Temps)
+
     for i in range(steps - 1):
-        cum_ratio_V = cum_f(ratio_V[i:], x=Temps[i:], initial=0)
+        logP_f[i] = _logP_f_single_slice(
+            Temps[i:], ratio_V[i:], H[i:], f_ext[i:], v_w,
+            R_0=R_0, integrator=integrator)
 
-        f1 = ratio_V[i:] / H[i:] * np.exp(cum_ratio_V / 3.)
-        cum_f1 = cum_f(f1, x=Temps[i:], initial=0) + R_0 # domain radius
-
-        f2 = f_ext[i:] * np.exp(- cum_ratio_V) * cum_f1**3
-        cum_f2 = cum_f(f2, x=Temps[i:], initial=0)
-
-        logP_f[i] = - 4. / 243. * np.pi * v_w**3 * cum_f2[-1]
-    
     return logP_f, Temps, ratio_V, Gamma_list, H
 
 
-def N_bubblesH(Temps, Gamma, logP_f, H, ratio_V):
-    integrand = Gamma * np.exp(logP_f) * ratio_V / H**4
-    integral = cumulative_trapezoid(np.flip(integrand), initial=0, x=np.flip(Temps))
+def N_bubblesH(Temps, Gamma, logP_f, H, ratio_V, integrator='trapz'):
+    """
+    Integrate bubble-number quantities from each grid temperature to T_c.
 
+    integrator='trapz': legacy cumulative trapezoid (used for nH / T_nuc).
+    integrator='log_trapz': log-linear quadrature (used for Nf_list / _Nf_list_at).
+    """
+    integrand = Gamma * np.exp(logP_f) * ratio_V / H**4
+    n = len(Temps)
+    result = np.zeros_like(Temps, dtype=float)
+
+    if integrator == 'log_trapz':
+        for i in range(n - 1):
+            result[i] = log_trapz(integrand[i:], Temps[i:])
+        return 4.0 * np.pi / 9.0 * result
+
+    integral = cumulative_trapezoid(np.flip(integrand), initial=0, x=np.flip(Temps))
     return 4 * np.pi / 9 * np.flip(-integral)
 
-# False-vacuum bubbles
-def nf_vals_at(T_slice, H_slice, ratio_slice, Gamma_slice, logP_f_at_lower, v_w,
-               cum_f=cumulative_trapezoid):
+# False-vacuum bubble nucleation rate (Gamma_f) at a single lower temperature
+def Gamma_f_vals_at(T_slice, H_slice, ratio_slice, Gamma_slice, logP_f_at_lower, v_w,
+                    cum_f=cumulative_simpson):
     """
     4-fold false-vacuum bubble integral for a single lower temperature limit.
+
+    Returns the false-vacuum nucleation rate ``Gamma_f(T_lower)`` (Eq. 12 in
+    arXiv:2202.03439), not the patch count ``Nf``.
 
     ``T_slice`` is the ascending temperature grid from the lower limit to T_c.
     ``logP_f_at_lower`` is logP_f evaluated at the lower limit (first point of
@@ -443,12 +510,36 @@ def nf_vals_at(T_slice, H_slice, ratio_slice, Gamma_slice, logP_f_at_lower, v_w,
     return 32 * np.pi**4 * v_w**9 * np.exp(logP_f_at_lower) * final_val
 
 
-def compute_Gamma_f(m, V_min_value, S3overT, v_w, logP_f, units='GeV', cum_method='cumulative_trapezoid'):
+def compute_Gamma_f(m, V_min_value, S3overT, v_w, logP_f, units='GeV',
+                    cum_method='cumulative_trapezoid', integrator='log_trapz'):
+    '''
+    Nucleation rate of false-vacuum bubbles as given by Eq. (12) in https://arxiv.org/pdf/2202.03439.
+    '''
+    cum_f = log_cumulative_trapz if integrator == 'log_trapz' else cumulative_trapezoid
+
+    Temps, H, Gamma_list, ratio_V, _ = _barrier_thermo_fields(
+        m, V_min_value, S3overT, units=units)
+    steps = len(Temps)
+
+    Gamma_f_vals = np.zeros_like(Temps)
+
+    for i in range(steps - 1):
+        Gamma_f_vals[i] = Gamma_f_vals_at(Temps[i:], H[i:], ratio_V[i:], Gamma_list[i:],
+                                          logP_f[i], v_w, cum_f=cum_f)
+
+    return Gamma_f_vals, Temps, ratio_V, Gamma_list, H
+
+
+# False-vacuum bubbles
+def compute_Gamma_f_v1(m, V_min_value, S3overT, v_w, logP_f, units='GeV', cum_method='cumulative_simpson'):
     '''
     Nucleation rate of false-vacuum bubbles as given by Eq. (12) in https://arxiv.org/pdf/2202.03439.
     '''
     # Select cumulative integration routine
-    cum_f = cumulative_trapezoid
+    if cum_method == 'cumulative_simpson':
+        cum_f = cumulative_simpson
+    else:
+        cum_f = cumulative_trapezoid
 
     V = m.Vtot
 
@@ -474,14 +565,80 @@ def compute_Gamma_f(m, V_min_value, S3overT, v_w, logP_f, units='GeV', cum_metho
     ratio_V = np.array([d2VdT2(0, T) / dVdT(0, T) for T in Temps]).flatten()
 
     # Output array (one value for each possible lower limit T)
-    Nf_vals = np.zeros_like(Temps)
+    Gamma_f_vals = np.zeros_like(Temps)
 
     # Loop over lower-limit index i; Temps[i] is the T in integral
     for i in range(steps - 1):
-        Nf_vals[i] = nf_vals_at(Temps[i:], H[i:], ratio_V[i:], Gamma_list[i:],
-                                logP_f[i], v_w, cum_f=cum_f)
+        # Work on the slice Temps[i:] which runs from T up to T_c
+        T_slice = Temps[i:]
+        H_slice = H[i:]
+        ratio_slice = ratio_V[i:]
+        Gamma_slice = Gamma_list[i:]
 
-    return Nf_vals, Temps, ratio_V, Gamma_list, H
+        # cumulative integral of ratio from T to T' : cum_ratio[j] = ∫_{T}^{T_j} ratio_V dT
+        cum_ratio = cum_f(ratio_slice, x=T_slice, initial=0.0)
+
+        # Precompute a(T_j)/a(T) = exp(cum_ratio/3)
+        a_over_aT = np.exp(cum_ratio / 3.0)
+
+        # --- Compute the inner integral for each candidate T_j in the slice:
+        # inner_j = ∫_{T}^{T_j} dT' [ (1/(3 H(T'))) * ratio_V(T') * a(T_j)/a(T') ]
+        # Note: a(T_j)/a(T') = exp( (cum_ratio[j] - cum_ratio[j']) / 3 )
+        n_slice = len(T_slice)
+        inner_vals = np.zeros(n_slice)
+
+        # We'll compute inner_vals[k] for k = 0..n_slice-1 (k=0 -> integral from T to T -> zero)
+        # loop over k (index of T_j)
+        for k in range(n_slice):
+            if k == 0:
+                inner_vals[k] = 0.0
+                continue
+
+            # integrand over indices 0..k inclusive (T' in [T, T_j])
+            # build array of exponent factors: exp((cum_ratio[k] - cum_ratio[0:k+1]) / 3)
+            exp_factors = np.exp((cum_ratio[k] - cum_ratio[:k + 1]) / 3.0)
+
+            integrand_inner = (ratio_slice[:k + 1] / (3.0 * H_slice[:k + 1])) * exp_factors
+            # cumulative integral from T to T_j -> last element of cumulative integral
+            inner_cum = cum_f(integrand_inner, x=T_slice[:k + 1], initial=0.0)
+            inner_vals[k] = inner_cum[-1]
+
+        # Now form f_array[k] = (1/(3 H_k)) * ratio_k * (inner_vals[k])^2 * Gamma_k * a(T_k)/a(T)
+        f_array = (ratio_slice / (3.0 * H_slice)) * (inner_vals**2) * Gamma_slice * a_over_aT
+
+        # The 4-fold iterated integral over ordered variables T1<=T2<=T3<=T4:
+        # I = ∫_{T}^{Tc} dT1 f(T1) ∫_{T1}^{Tc} dT2 f(T2) ∫_{T2}^{Tc} dT3 f(T3) ∫_{T3}^{Tc} dT4 f(T4)
+
+        # Step A: J3[j] = ∫_{T_j}^{Tc} f(T4) dT4  (integral of f from each point to end)
+        cum_f_full = cum_f(f_array, x=T_slice, initial=0.0)  # cumulative from start T to each T_j
+        total_end = cum_f_full[-1]
+        # integral from position j to end = total_end - cum_f_full[j-1] (with j-1 -> 0 handling)
+        prev = np.concatenate(([0.0], cum_f_full[:-1]))
+        J3 = total_end - prev  # J3 has same length as f_array
+
+        # Step B: J2[j] = ∫_{T_j}^{Tc} f(T2) * J3(T2) dT2
+        product1 = f_array * J3
+        cum_product1 = cum_f(product1, x=T_slice, initial=0.0)
+        total_end_p1 = cum_product1[-1]
+        prev_p1 = np.concatenate(([0.0], cum_product1[:-1]))
+        J2 = total_end_p1 - prev_p1
+
+        # Step C: J1[j] = ∫_{T_j}^{Tc} f(T3) * J2(T3) dT3
+        product2 = f_array * J2
+        cum_product2 = cum_f(product2, x=T_slice, initial=0.0)
+        total_end_p2 = cum_product2[-1]
+        prev_p2 = np.concatenate(([0.0], cum_product2[:-1]))
+        J1 = total_end_p2 - prev_p2
+
+        # Step D: Final value = ∫_{T}^{Tc} f(T1) * J1(T1) dT1
+        product3 = f_array * J1
+        cum_product3 = cum_f(product3, x=T_slice, initial=0.0)
+        final_val = cum_product3[-1]
+
+        # Store the result for lower-limit Temps[i]
+        Gamma_f_vals[i] = 32*np.pi**4 * v_w**9 * np.exp(logP_f[i]) * final_val
+
+    return Gamma_f_vals, Temps, ratio_V, Gamma_list, H
 
 
 def R_sepH(Temps, Gamma, logP_f, H, ratio_V):
@@ -499,7 +656,11 @@ def R_sepH(Temps, Gamma, logP_f, H, ratio_V):
         f1 = f_ext[i:] * np.exp(- cum_ratio_V)
         n[i] = trapezoid(f1, x=Temps[i:])
 
-    return n**(-1/3) * H, n**(-1/3)
+    # n=0 at the highest-T grid points (no bubbles nucleated there); avoid 0**(-1/3).
+    inv_n_third = np.full_like(n, np.nan)
+    positive = n > 0
+    inv_n_third[positive] = n[positive] ** (-1.0 / 3.0)
+    return inv_n_third * H, inv_n_third
 
 def R_meanH(Temps, Gamma, logP_f, H, ratio_V, R_sepH_res, R_0=0.):
     '''Mean bubble radius as defined in https://arxiv.org/abs/2305.02357 eq. (5.43).'''

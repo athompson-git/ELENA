@@ -8,6 +8,113 @@ M_pl = 2.4353234600842885e+18
 def is_increasing(arr):
     return np.all(arr[:-1] <= arr[1:])
 
+
+def stable_logP_t(logP_f):
+    """log(1 - exp(logP_f)) without underflow when logP_f << 0."""
+    logP_f = float(logP_f)
+    if logP_f >= -1e-12:
+        return np.log(max(-logP_f, 1e-300))
+    return float(np.log1p(-np.exp(logP_f)))
+
+
+def _log_trapz_cell(yi, yj, dx):
+    """Single-cell contribution assuming log-linear y(x) between endpoints."""
+    if yi <= 0.0 or yj <= 0.0 or not np.isfinite(yi) or not np.isfinite(yj):
+        return 0.5 * (yi + yj) * dx
+    if yi == yj:
+        return yi * dx
+    log_ratio = np.log(yj / yi)
+    if abs(log_ratio) < 1e-12:
+        return yi * dx
+    return (yj - yi) * dx / log_ratio
+
+
+def log_trapz(y, x):
+    """
+    Integrate y(x) with log-linear interpolation per cell (exact for
+    exponential integrands). Falls back to trapezoidal on bad cells.
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    if len(x) < 2:
+        return 0.0
+    total = 0.0
+    for i in range(len(x) - 1):
+        total += _log_trapz_cell(y[i], y[i + 1], x[i + 1] - x[i])
+    return total
+
+
+def log_cumulative_trapz(y, x, initial=0.0):
+    """Cumulative version of log_trapz, matching cumulative_trapezoid layout."""
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    out = np.zeros(n, dtype=float)
+    if n == 0:
+        return out
+    out[0] = initial
+    total = float(initial)
+    for i in range(n - 1):
+        total += _log_trapz_cell(y[i], y[i + 1], x[i + 1] - x[i])
+        out[i + 1] = total
+    return out
+
+
+def interp_positive_log(xq, x, y):
+    """
+    Interpolate positive ``y(x)`` at ``xq`` with log-linear rule per cell
+    (exact for exponential profiles). Falls back to ``np.interp`` on bad data.
+    """
+    xq = float(xq)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 2:
+        return float(y[0]) if len(y) else float("nan")
+    if xq <= x[0]:
+        return float(y[0])
+    if xq >= x[-1]:
+        return float(y[-1])
+    i = int(np.searchsorted(x, xq) - 1)
+    x0, x1 = float(x[i]), float(x[i + 1])
+    y0, y1 = float(y[i]), float(y[i + 1])
+    if (not np.isfinite(y0)) or (not np.isfinite(y1)) or y0 <= 0.0 or y1 <= 0.0:
+        return float(np.interp(xq, x, y))
+    if y0 == y1:
+        return y0
+    log_ratio = np.log(y1 / y0)
+    if abs(log_ratio) < 1e-12:
+        return y0
+    t = (xq - x0) / (x1 - x0)
+    return float(y0 * (y1 / y0) ** t)
+
+
+def interpolation_narrow_log(y, x, target):
+    """
+    Bracket ``target`` in ``y`` (same logic as ``interpolation_narrow``) but
+    interpolate ``x`` via log-linear rule in ``y`` when both bracket values
+    are positive; otherwise fall back to linear ``np.interp``.
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    greater_than_target = y[y > target]
+    less_than_target = y[y < target]
+    if len(greater_than_target) == 0 or len(less_than_target) == 0:
+        return np.nan
+    mask = np.zeros(y.shape, dtype=bool)
+    closest_greater = greater_than_target[np.abs(greater_than_target - target).argmin()]
+    mask[y == closest_greater] = True
+    closest_less = less_than_target[np.abs(less_than_target - target).argmin()]
+    mask[y == closest_less] = True
+    yb = y[mask]
+    xb = x[mask]
+    if yb[-1] < yb[0]:
+        yb = np.flip(yb)
+        xb = np.flip(xb)
+    if yb[0] > 0.0 and yb[1] > 0.0 and target > 0.0:
+        t = (np.log(target) - np.log(yb[0])) / (np.log(yb[1]) - np.log(yb[0]))
+        return float(xb[0] + t * (xb[1] - xb[0]))
+    return float(np.interp(target, yb, xb))
+
 # Assume the standad unit is GeV
 convert_units = {
     'MeV': 1e3,
